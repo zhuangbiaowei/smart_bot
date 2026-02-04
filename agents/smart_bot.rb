@@ -4,21 +4,23 @@
 SmartAgent.define :smart_bot do
   question = params[:text]
   
-  # 使用 call_worker 处理对话，工具由 build_agent 时定义
-  loop do
+  # 第一次调用，可能触发工具
+  result = call_worker(:smart_bot, params.merge(
+    with_tools: true,
+    with_history: true
+  ))
+  
+  # 如果调用了工具，循环处理直到完成
+  while result.call_tools
+    call_tools(result)
+    # 工具执行后，让 LLM 继续处理
     result = call_worker(:smart_bot, params.merge(
+      with_tools: true,
       with_history: true
     ))
-    
-    if result.call_tools
-      # 执行工具调用
-      call_tools(result)
-      params[:text] = "请根据工具执行结果继续回答"
-    else
-      # 没有工具调用，返回最终答案
-      break result.content
-    end
   end
+  
+  result.content
 end
 
 # 构建 SmartBot Agent - 工具在这里定义

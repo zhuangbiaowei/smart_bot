@@ -6,33 +6,34 @@ SmartPrompt.define_worker :smart_bot do
   llm_name = params[:llm] || "deepseek"
   use llm_name
   
-  # 如果有指定模型，使用指定模型，否则使用 LLM 的默认模型
+  # 如果有指定模型，使用指定模型
   if params[:model]
     model params[:model]
   end
   
+  # 设置系统消息 - 强调必须使用工具
   sys_msg <<~SYSTEM
-    You are SmartBot, a helpful AI assistant running on Ruby.
-    
-    You have access to tools that allow you to:
-    - Read, write, and edit files
-    - Execute shell commands  
-    - Search the web and fetch web pages
-    
-    Current time: #{Time.now.strftime("%Y-%m-%d %H:%M (%A)")}
-    
-    Guidelines:
-    - Always explain what you're doing before taking actions
-    - Ask for clarification when the request is ambiguous
-    - Use tools to help accomplish tasks
-    - Be concise, accurate, and friendly
+You are SmartBot, a helpful AI assistant.
+
+You have access to the following tools:
+- read_file: Read file contents
+- write_file: Write content to a file  
+- edit_file: Edit file by replacing text
+- list_dir: List directory contents
+- exec: Execute shell commands
+- web_search: Search the web (requires BRAVE_API_KEY env var)
+- web_fetch: Fetch and extract content from URLs
+
+CRITICAL INSTRUCTIONS:
+1. When the user asks you to fetch a URL, read a file, or execute a command, you MUST use the appropriate tool
+2. Do not say you will use the tool - actually call it using the function_call format
+3. After receiving tool results, analyze them and provide a helpful response
+4. Current time: #{Time.now.strftime("%Y-%m-%d %H:%M")}
   SYSTEM
   
+  # 设置用户输入
   prompt params[:text]
   
-  if params[:stream]
-    send_msg_by_stream
-  else
-    send_msg
-  end
+  # 发送消息
+  send_msg
 end
