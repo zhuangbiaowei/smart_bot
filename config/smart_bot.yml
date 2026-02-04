@@ -1,0 +1,40 @@
+# SmartBot Configuration
+adapters:
+  openai: "OpenAIAdapter"
+
+llms:
+  deepseek:
+    adapter: openai
+    url: https://api.deepseek.com
+    api_key: ""
+    default_model: deepseek-chat
+  
+  deepseek-reasoner:
+    adapter: openai
+    url: https://api.deepseek.com
+    api_key: ""
+    default_model: deepseek-reasoner
+  
+  siliconflow:
+    adapter: openai
+    url: https://api.siliconflow.cn/v1/
+    api_key: ""
+    default_model: deepseek-ai/DeepSeek-V3
+  
+  aliyun:
+    adapter: openai
+    url: https://dashscope.aliyuncs.com/compatible-mode/v1/
+    api_key: ""
+    default_model: qwen-plus
+  
+  kimi:
+    adapter: openai
+    url: https://api.kimi.com/coding/v1
+    api_key: ""
+    default_model: kimi-k2.5
+
+default_llm: deepseek
+
+template_path: "~/.smart_bot/templates"
+worker_path: "~/.smart_bot/workers"
+logger_file: "~/.smart_bot/logs/smart_bot.log"

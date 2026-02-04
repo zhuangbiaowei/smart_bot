@@ -3,57 +3,60 @@
 require "json"
 require "fileutils"
 require "pathname"
+require "yaml"
 
 module SmartBot
   class Config
     DEFAULTS = {
       workspace: "~/.smart_bot/workspace",
-      model: "anthropic/claude-opus-4-5",
+      model: "deepseek-chat",
       max_tokens: 8192,
       temperature: 0.7,
-      max_tool_iterations: 20,
-      gateway_host: "0.0.0.0",
-      gateway_port: 18790,
-      providers: {
-        openrouter: { api_key: "", api_base: "https://openrouter.ai/api/v1" },
-        anthropic: { api_key: "", api_base: nil },
-        openai: { api_key: "", api_base: nil },
-        gemini: { api_key: "", api_base: nil },
-        groq: { api_key: "", api_base: nil }
-      },
-      channels: {
-        telegram: { enabled: false, token: "", allow_from: [] },
-        whatsapp: { enabled: false, allow_from: [] }
-      },
-      tools: {
-        web_search: { api_key: "", max_results: 5 }
-      }
+      max_tool_iterations: 20
     }.freeze
 
     attr_accessor :workspace, :model, :max_tokens, :temperature, :max_tool_iterations
-    attr_accessor :gateway_host, :gateway_port
-    attr_accessor :providers, :channels, :tools
 
     def initialize(attrs = {})
       DEFAULTS.each do |key, value|
-        instance_variable_set("@#{key}", attrs[key] || attrs[key.to_s] || deep_copy(value))
+        instance_variable_set("@#{key}", attrs[key] || attrs[key.to_s] || value)
       end
     end
 
     def self.load(config_path = nil)
-      path = config_path || default_config_path
+      # Try YAML config first (new format)
+      yaml_path = config_path || File.expand_path("~/.smart_bot/smart_bot.yml")
       
-      if File.exist?(path)
+      if File.exist?(yaml_path)
         begin
-          data = JSON.parse(File.read(path), symbolize_names: true)
-          new(data)
+          content = File.read(yaml_path)
+          # Replace environment variables
+          content = content.gsub(/\\$\\{(\\w+)\\}/) { ENV[$1] || "" }
+          data = YAML.load(content)
+          
+          return new(
+            workspace: data["workspace"],
+            model: data["default_llm"],
+            max_tokens: data["max_tokens"],
+            temperature: data["temperature"]
+          )
+        rescue => e
+          SmartBot.logger.error "Failed to parse config: #{e.message}"
+        end
+      end
+      
+      # Fall back to JSON config (legacy)
+      json_path = File.expand_path("~/.smart_bot/config.json")
+      if File.exist?(json_path)
+        begin
+          data = JSON.parse(File.read(json_path), symbolize_names: true)
+          return new(data)
         rescue JSON::ParserError => e
           SmartBot.logger.error "Failed to parse config: #{e.message}"
-          new
         end
-      else
-        new
       end
+      
+      new
     end
 
     def save(config_path = nil)
@@ -76,87 +79,14 @@ module SmartBot
       Pathname.new(File.expand_path(@workspace))
     end
 
-    def api_key
-      key = providers[:openrouter][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:deepseek][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:siliconflow][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:aliyun][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:kimi_coding][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:anthropic][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:openai][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:gemini][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      key = providers[:groq][:api_key]
-      return key if key && !key.to_s.strip.empty?
-      
-      nil
-    end
-
-    def api_base
-      key = providers[:openrouter][:api_key]
-      return providers[:openrouter][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:deepseek][:api_key]
-      return providers[:deepseek][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:siliconflow][:api_key]
-      return providers[:siliconflow][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:aliyun][:api_key]
-      return providers[:aliyun][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:kimi_coding][:api_key]
-      return providers[:kimi_coding][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:anthropic][:api_key]
-      return providers[:anthropic][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:openai][:api_key]
-      return providers[:openai][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:gemini][:api_key]
-      return providers[:gemini][:api_base] if key && !key.to_s.strip.empty?
-      
-      key = providers[:groq][:api_key]
-      return providers[:groq][:api_base] if key && !key.to_s.strip.empty?
-      
-      nil
-    end
-
     def to_h
       {
         workspace: @workspace,
         model: @model,
         max_tokens: @max_tokens,
         temperature: @temperature,
-        max_tool_iterations: @max_tool_iterations,
-        gateway_host: @gateway_host,
-        gateway_port: @gateway_port,
-        providers: @providers,
-        channels: @channels,
-        tools: @tools
+        max_tool_iterations: @max_tool_iterations
       }
-    end
-
-    private
-
-    def deep_copy(obj)
-      Marshal.load(Marshal.dump(obj))
     end
   end
 end
