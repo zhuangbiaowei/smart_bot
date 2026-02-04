@@ -145,8 +145,19 @@ smart_bot agent -s "project1" -m "记住这是项目1"
 | `smart_bot agent -m "消息"` | 单次对话模式 |
 | `smart_bot agent` | 交互对话模式 |
 | `smart_bot status` | 查看配置状态 |
+| `smart_bot skill NAME` | 创建新 Skill |
 | `smart_bot cron list` | 列出定时任务 |
 | `smart_bot cron add ...` | 添加定时任务 |
+
+**交互模式命令：**
+
+| 命令 | 描述 |
+|------|------|
+| `/models` | 列出所有可用 LLM 提供商 |
+| `/llm <name>` | 切换到指定提供商 |
+| `/skills` | 列出已加载的 Skills |
+| `/help` | 显示帮助信息 |
+| `Ctrl+C` | 退出交互模式 |
 
 ## 项目结构
 
@@ -166,10 +177,19 @@ smart_bot agent -s "project1" -m "记住这是项目1"
 │   ├── smart_bot.rb     # Agent 定义（SmartAgent.define）
 │   ├── workers/         # Workers（SmartPrompt.define_worker）
 │   │   └── smart_bot.rb
-│   └── tools/           # Tools（SmartAgent::Tool.define）
-│       ├── read_file.rb
-│       ├── write_file.rb
-│       └── ...
+│   ├── tools/           # Tools（SmartAgent::Tool.define）
+│   │   ├── read_file.rb
+│   │   ├── write_file.rb
+│   │   └── ...
+│   └── mcp_clients/     # MCP 客户端配置
+│       └── all_in_one.rb
+├── skills/              # Skill 插件目录
+│   ├── search/          # 搜索 Skill
+│   │   ├── skill.rb
+│   │   └── SKILL.md
+│   └── weather/         # 天气 Skill
+│       ├── skill.rb
+│       └── SKILL.md
 └── config/
     └── smart_bot.yml    # 默认配置模板
 ```
@@ -255,6 +275,75 @@ smart_bot agent -m "bing 搜索 OpenAI API"
 如果无法使用 SerpAPI，可以使用 Brave Search：
 ```bash
 export BRAVE_API_KEY="BSA-your-brave-key"
+```
+
+## Skill 系统
+
+SmartBot 支持类似 OpenClaw 的 Skill 插件机制，可以方便地扩展功能。
+
+### 创建 Skill
+
+```bash
+# 创建新 skill
+smart_bot skill my_skill -d "My skill description" -a "Author Name"
+
+# 这会创建：
+# ~/smart_ai/smart_bot/skills/my_skill/
+#   ├── skill.rb   # Skill 定义
+#   └── SKILL.md   # 文档
+```
+
+### Skill 结构
+
+```ruby
+# skill.rb
+SmartBot::Skill.register :my_skill do
+  desc "My skill description"
+  ver "1.0.0"
+  author_name "Author Name"
+
+  # 注册工具
+  register_tool :my_tool do
+    desc "Tool description"
+    param_define :param1, "Parameter", :string
+    
+    tool_proc do
+      { result: "success" }
+    end
+  end
+
+  # 注册 MCP 客户端
+  register_mcp :my_mcp do
+    type :sse
+    url "https://example.com/mcp/sse"
+  end
+
+  on_activate do
+    SmartAgent.logger&.info "my_skill activated!"
+  end
+end
+```
+
+### 内置 Skills
+
+| Skill | 描述 | 工具 |
+|-------|------|------|
+| `search` | 多源搜索 | `smart_search`, `smart_scrape` |
+| `weather` | 天气查询 | `get_weather`, `get_forecast` |
+
+### 查看已加载 Skills
+
+```bash
+# 在交互模式中
+> /skills
+
+🛠️  Loaded Skills:
+  • search - 多源搜索功能
+    Version: 1.0.0
+    Tools: smart_search, smart_scrape
+  • weather - 获取天气信息
+    Version: 1.0.0
+    Tools: get_weather, get_forecast
 ```
 
 ## 开发

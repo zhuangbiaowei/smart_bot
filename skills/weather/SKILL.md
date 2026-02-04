@@ -1,29 +1,24 @@
----
-description: Get current weather information
-always: false
-requires:
-  bins: []
-  env: [OPENWEATHER_API_KEY]
----
-
 # Weather Skill
 
-Use this skill to get weather information for any location.
+获取天气信息和预报。
 
 ## Usage
 
-Use the `web_fetch` tool to get weather data from OpenWeatherMap API:
-
 ```ruby
-# Example API call
-api_key = ENV["OPENWEATHER_API_KEY"]
-url = "https://api.openweathermap.org/data/2.5/weather?q=#{city}&appid=#{api_key}&units=metric"
+# 获取当前天气
+SmartAgent::Tool.call(:get_weather, { "location" => "Shanghai", "unit" => "c" })
+
+# 获取天气预报
+SmartAgent::Tool.call(:get_forecast, { "location" => "Shanghai", "days" => 3 })
 ```
 
-## Configuration
-
-Set your OpenWeather API key in the environment:
+## CLI Usage
 
 ```bash
-export OPENWEATHER_API_KEY="your-api-key"
+smart_bot agent -m "上海天气"
+smart_bot agent -m "北京明天天气怎么样"
 ```
+
+## API
+
+此 skill 使用 wttr.in API（免费，无需 API Key）。

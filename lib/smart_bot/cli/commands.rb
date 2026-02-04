@@ -23,8 +23,14 @@ module SmartBot
         # 加载配置和工具
         agent_config = File.expand_path("~/.smart_bot/agent.yml")
         @agent_engine = SmartAgent::Engine.new(agent_config)
+        
+        # 加载 Skill 系统
+        load_skill_system
         load_smartbot_tools
         load_mcp_clients
+        
+        # 加载并激活所有 skills
+        load_and_activate_skills
         
         # 获取当前配置
         smart_prompt_config = YAML.load_file(File.expand_path("~/.smart_bot/smart_prompt.yml"))
@@ -37,7 +43,7 @@ module SmartBot
         else
           # 交互模式
           say "🤖 SmartBot (powered by SmartAgent)"
-          say "   Commands: /models, /llm <name>, /help\n"
+          say "   Commands: /models, /llm <name>, /skills, /help\n"
 
           loop do
             begin
@@ -94,6 +100,7 @@ module SmartBot
         FileUtils.mkdir_p(File.expand_path("~/.smart_bot/logs"))
         FileUtils.mkdir_p(File.expand_path("~/.smart_bot/workspace"))
         FileUtils.mkdir_p(File.expand_path("~/.smart_bot/workers"))
+        FileUtils.mkdir_p(File.expand_path("~/smart_ai/smart_bot/skills"))
         
         say "✓ Created directories", :green
         
@@ -106,6 +113,44 @@ module SmartBot
         say "\n请编辑配置文件添加 API Key："
         say "  ~/.smart_bot/smart_prompt.yml"
         say "\n然后运行: smart_bot agent"
+      end
+
+      desc "skill NAME", "Create a new skill"
+      option :description, aliases: "-d", default: "A new skill", desc: "Skill description"
+      option :author, aliases: "-a", default: "SmartBot User", desc: "Author name"
+      def skill(name)
+        # 验证名称
+        unless name =~ /^[a-z][a-z0-9_]*$/
+          say "❌ Invalid skill name. Use lowercase letters, numbers, and underscores only.", :red
+          return
+        end
+        
+        # 创建目录
+        skills_dir = File.expand_path("~/smart_ai/smart_bot/skills")
+        skill_dir = File.join(skills_dir, name)
+        
+        if File.exist?(skill_dir)
+          say "❌ Skill '#{name}' already exists!", :red
+          return
+        end
+        
+        FileUtils.mkdir_p(skill_dir)
+        
+        # 创建 skill.rb
+        skill_rb = File.join(skill_dir, "skill.rb")
+        File.write(skill_rb, skill_template(name, options))
+        
+        # 创建 SKILL.md
+        skill_md = File.join(skill_dir, "SKILL.md")
+        File.write(skill_md, skill_md_template(name, options))
+        
+        say "✅ Created skill '#{name}'", :green
+        say "   Location: #{skill_dir}"
+        say "   Files:"
+        say "     - skill.rb"
+        say "     - SKILL.md"
+        say "\n📝 To activate your skill:"
+        say "   The skill will be automatically loaded when you run smart_bot agent"
       end
 
       private
@@ -132,6 +177,35 @@ module SmartBot
           if match = message.match(pattern)
             search_query = match[1].strip
             break
+          end
+        end
+        
+        # 检查是否是天气请求
+        weather_match = message.match(/(.+?)(?:的)?天气/i) || message.match(/weather\s+(?:in|for)?\s+(.+)/i)
+        if weather_match && !search_query
+          location = weather_match[1].strip
+          # 移除常见后缀
+          location = location.gsub(/今天|明天|后天|现在|怎么样|如何/, '').strip
+          
+          say "🌤️  正在查询 #{location} 的天气...", :cyan
+          
+          tool = SmartAgent::Tool.find_tool(:get_weather)
+          if tool
+            result = tool.call({ "location" => location, "unit" => "c" })
+            
+            if result[:error]
+              return "查询天气失败: #{result[:error]}"
+            end
+            
+            return <<~WEATHER
+              #{result[:location]}, #{result[:country]} 当前天气:
+              
+              🌡️  温度: #{result[:temperature]}
+              📝  状况: #{result[:condition]}
+              💧  湿度: #{result[:humidity]}
+              💨  风速: #{result[:wind]}
+              🤔  体感: #{result[:feels_like]}
+            WEATHER
           end
         end
         
@@ -393,6 +467,32 @@ module SmartBot
         nil
       end
 
+      # 加载 Skill 系统
+      def load_skill_system
+        require_relative "../skill"
+      rescue => e
+        say "⚠️  Failed to load skill system: #{e.message}", :yellow
+      end
+
+      # 加载并激活所有 skills
+      def load_and_activate_skills
+        skills_dir = File.expand_path("~/smart_ai/smart_bot/skills")
+        
+        # 加载所有 skill 文件
+        SmartBot::Skill.load_all(skills_dir)
+        
+        # 激活所有已注册的 skills
+        SmartBot::Skill.activate_all!
+        
+        # 显示已加载的 skills
+        loaded_skills = SmartBot::Skill.list
+        if loaded_skills.any?
+          say "   Loaded skills: #{loaded_skills.join(', ')}", :green
+        end
+      rescue => e
+        say "⚠️  Failed to load skills: #{e.message}", :yellow
+      end
+
       # 加载 SmartBot 自定义工具
       def load_smartbot_tools
         tools_dir = File.expand_path("~/smart_ai/smart_bot/agents/tools")
@@ -446,6 +546,7 @@ module SmartBot
           say "\n📖 Commands:"
           say "  /models        - List available LLMs"
           say "  /llm <name>   - Switch LLM provider"
+          say "  /skills        - List loaded skills"
           say "  /help          - Show this help"
           say "  Ctrl+C         - Exit\n"
           
@@ -471,9 +572,88 @@ module SmartBot
           else
             say "❌ Unknown LLM: #{new_llm}", :red
           end
+          
+        when "/skills"
+          say "\n🛠️  Loaded Skills:\n"
+          
+          if SmartBot::Skill.list.empty?
+            say "   No skills loaded", :yellow
+          else
+            SmartBot::Skill.registry.each do |name, skill|
+              say "  • #{set_color(name.to_s, :green)} - #{skill.description}"
+              say "    Version: #{skill.version}, Author: #{skill.author}"
+              if skill.tools.any?
+                say "    Tools: #{skill.tools.map { |t| t[:name] }.join(', ')}"
+              end
+              say ""
+            end
+          end
+          
         else
           say "Unknown command: #{cmd}. Type /help for available commands.", :yellow
         end
+      end
+
+      # Skill 模板
+      def skill_template(name, options)
+        class_name = name.split('_').map(&:capitalize).join
+        <<~TEMPLATE
+# frozen_string_literal: true
+
+# #{class_name} Skill - #{options[:description]}
+
+SmartBot::Skill.register :#{name} do
+  desc "#{options[:description]}"
+  ver "0.1.0"
+  author_name "#{options[:author]}"
+
+  # 注册工具示例
+  # register_tool :#{name}_tool do
+  #   desc "Description of what this tool does"
+  #   param_define :param1, "Parameter description", :string
+  #   
+  #   tool_proc do
+  #     # Tool implementation
+  #     { result: "success" }
+  #   end
+  # end
+
+  # 激活时的配置
+  on_activate do
+    SmartAgent.logger&.info "#{name} skill activated!"
+  end
+end
+        TEMPLATE
+      end
+
+      def skill_md_template(name, options)
+        class_name = name.split('_').map(&:capitalize).join
+        <<~TEMPLATE
+# #{class_name} Skill
+
+#{options[:description]}
+
+## Usage
+
+```ruby
+# Add usage examples here
+SmartAgent::Tool.call(:your_tool_name, { "param" => "value" })
+```
+
+## CLI Usage
+
+```bash
+smart_bot agent -m "your command here"
+```
+
+## Configuration
+
+Add configuration instructions here.
+
+## Author
+
+#{options[:author]}
+        TEMPLATE
       end
     end
   end
