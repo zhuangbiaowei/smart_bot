@@ -199,12 +199,63 @@ llms:
 
 ### 可选工具配置
 
-设置环境变量启用网络搜索：
+**MCP 服务（推荐优先使用）：**
+
+SmartBot 已集成 DePHY Mesh API MCP 服务，提供强大的搜索、网页抓取、数据分析等功能。
+
+```ruby
+# 配置位于 agents/mcp_clients/all_in_one.rb
+SmartAgent::MCPClient.define :all_in_one do
+  type :sse
+  url "https://mesh-api.dephy.io/mcp/d766aab9-eefb-4c82-b132-959370a131d8/sse"
+end
+```
+
+**MCP 提供的工具：**
+- `search` - 通用网络搜索（**优先使用**）
+- `scrape` - 网页抓取
+- `linkedin-search` / `company-search` - 商业信息搜索
+- `maps_search_places` / `maps_directions` - 地图服务
+- `get_token_price` / `get_wallet_activities` - 区块链数据
+- 更多工具...
+
+**使用方法：**
+```bash
+# 使用 MCP 搜索（默认优先）
+smart_bot agent -m "搜索 OpenAI 最新动态"
+
+# 抓取网页
+smart_bot agent -m "抓取 https://example.com"
+```
+
+**启用网络搜索（推荐 SerpAPI）：**
+
+SerpAPI 支持 Google、Bing、Baidu、Yahoo 等多种搜索引擎，返回结果更丰富。
+
+1. 从 https://serpapi.com/ 注册获取 API Key
+2. 设置环境变量：
+```bash
+export SERP_API_KEY="your-serpapi-key"
+```
+
+**使用方法：**
+```bash
+# 使用 Google 搜索（默认）
+smart_bot agent -m "搜索 Ruby on Rails 最新版本"
+
+# 使用 Baidu 搜索
+smart_bot agent -m "baidu 搜索 Python 教程"
+
+# 使用 Bing 搜索
+smart_bot agent -m "bing 搜索 OpenAI API"
+```
+
+**备用方案 - Brave Search：**
+
+如果无法使用 SerpAPI，可以使用 Brave Search：
 ```bash
 export BRAVE_API_KEY="BSA-your-brave-key"
 ```
-
-获取 Brave API Key: https://brave.com/search/api/
 
 ## 开发
 

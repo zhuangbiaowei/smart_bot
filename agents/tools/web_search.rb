@@ -15,8 +15,8 @@ SmartAgent::Tool.define :web_search do
     count = input_params["count"] || 5
     
     api_key = ENV["BRAVE_API_KEY"]
-    unless api_key
-      return { error: "Brave API key not configured" }
+    if api_key.nil? || api_key.strip.empty?
+      next { error: "Brave API key not configured" }
     end
     
     begin
@@ -43,7 +43,7 @@ SmartAgent::Tool.define :web_search do
         
         { query: query, results: results, count: results.length }
       else
-        { error: "Search failed: #{response.code}" }
+        { error: "Search failed: #{response.code} - #{response.message}" }
       end
     rescue => e
       { error: "Error searching: #{e.message}" }
