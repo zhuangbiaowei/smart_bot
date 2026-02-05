@@ -59,7 +59,8 @@ module SmartBot
           # 创建 Conversation 实例来维护对话历史
           conversation = SmartPrompt::Conversation.new(sp_engine)
           conversation.use(current_llm)
-          conversation.sys_msg("You are SmartBot, a helpful AI assistant. You have access to various tools and skills to help users.", with_history: false)
+          # 使用 with_history: true 确保系统消息也进入历史记录
+          conversation.sys_msg("You are SmartBot, a helpful AI assistant. Remember information the user shares with you during this conversation.", { with_history: true })
 
           loop do
             begin
@@ -73,7 +74,7 @@ module SmartBot
                   # 新建对话
                   conversation = SmartPrompt::Conversation.new(sp_engine)
                   conversation.use(current_llm)
-                  conversation.sys_msg("You are SmartBot, a helpful AI assistant.", with_history: false)
+                  conversation.sys_msg("You are SmartBot, a helpful AI assistant. Remember information the user shares with you during this conversation.", { with_history: true })
                   say "\n🆕 New conversation started!\n", :green
                 else
                   handle_command(user_input, smart_prompt_config, current_llm)
@@ -194,10 +195,43 @@ module SmartBot
           return skill_result if skill_result
         end
         
-        # ========== 2. 智能 Skill 匹配 ==========
-        # 尝试使用已加载的 Markdown Skills
-        skill_result = try_markdown_skills(message, llm_name)
-        return skill_result if skill_result
+        # ========== 2. 智能 Skill 推荐 ==========
+        # 使用模糊匹配 + LLM 选择来找到最佳技能
+        suggestions = smart_skill_suggest(message, llm_name, 3)
+        
+        if suggestions.any?
+          best = suggestions.first
+          
+          case best[:confidence]
+          when :explicit
+            # 已经在上面的显式检测中处理了
+            nil
+          when :high
+            # 高置信度模糊匹配，直接执行
+            say "🎯 找到匹配技能: #{best[:name]}", :green
+            skill_result = call_skill_by_name(best[:name], message, urls, llm_name)
+            return skill_result if skill_result
+          when :llm_selected
+            # LLM 选择的技能
+            say "🤖 推荐使用技能: #{best[:name]}", :cyan
+            skill_result = call_skill_by_name(best[:name], message, urls, llm_name)
+            return skill_result if skill_result
+          when :fuzzy
+            # 多个模糊匹配，询问用户或选择最佳
+            if suggestions.length == 1
+              say "🔍 找到可能匹配的技能: #{best[:name]} (置信度: #{best[:score]})", :yellow
+              skill_result = call_skill_by_name(best[:name], message, urls, llm_name)
+              return skill_result if skill_result
+            else
+              # 多个候选，列出供参考
+              list = suggestions.map { |s| "#{s[:name]}(#{s[:score]})" }.join(", ")
+              say "🔍 找到多个可能匹配的技能: #{list}", :yellow
+              say "   尝试使用第一个: #{best[:name]}..."
+              skill_result = call_skill_by_name(best[:name], message, urls, llm_name)
+              return skill_result if skill_result
+            end
+          end
+        end
         
         # ========== 3. 天气查询 ==========
         weather_match = message.match(/(.+?)(?:的)?天气/i) || message.match(/weather\s+(?:in|for)?\s+(.+)/i)
@@ -445,8 +479,8 @@ module SmartBot
               💧 湿度: #{result[:humidity]}
               💨 风速: #{result[:wind]}
             WEATHER
-            # 将天气信息加入对话历史
-            conversation.add_message({ role: "assistant", content: weather_info })
+            # 将天气信息加入对话历史（使用 with_history: true）
+            conversation.add_message({ role: "assistant", content: weather_info }, true)
             return weather_info
           end
         end
@@ -476,7 +510,10 @@ module SmartBot
           if server_name
             result = call_mcp_tool(server_name, "search", { "query" => search_query })
             if result
-              return format_search_result(result, search_query, llm_name)
+              search_result = format_search_result(result, search_query, llm_name)
+              # 将搜索结果加入对话历史
+              conversation.add_message({ role: "assistant", content: "搜索结果:\n#{search_result}" }, true)
+              return search_result
             end
           end
         end
@@ -488,15 +525,21 @@ module SmartBot
           if tool_result && !tool_result[:error]
             # 将网页内容作为上下文发送给 LLM
             context = "网页标题: #{tool_result[:title]}\n\n网页内容:\n#{tool_result[:content][0..2000]}"
-            conversation.add_message({ role: "user", content: "#{message}\n\n[网页内容]\n#{context}" })
-            response = conversation.send_msg
+            conversation.add_message({ role: "user", content: "#{message}\n\n[网页内容]\n#{context}" }, true)
+            response = conversation.send_msg(with_history: true)
+            # 将助手回复也加入历史
+            conversation.add_message({ role: "assistant", content: response }, true)
             return response
           end
         end
         
         # ========== 5. 普通对话（使用 Conversation 维护历史）==========
-        conversation.add_message({ role: "user", content: message })
-        response = conversation.send_msg
+        # 添加用户消息到历史（使用 with_history: true）
+        conversation.add_message({ role: "user", content: message }, true)
+        # 发送消息时使用 with_history: true 保留历史
+        response = conversation.send_msg(with_history: true)
+        # 将助手回复也加入历史
+        conversation.add_message({ role: "assistant", content: response }, true)
         response
       rescue => e
         "Error: #{e.message}"
@@ -719,6 +762,208 @@ module SmartBot
         
         nil
       end
+
+      # 模糊查找技能 - 基于关键词匹配描述、名称和标签
+      def fuzzy_find_skill(query, limit = 5)
+        return [] if query.nil? || query.strip.empty?
+        
+        query = query.downcase.strip
+        query_words = query.split(/[\s,，。！？?]+/).reject { |w| w.empty? }
+        
+        # 识别关键动作词 - 中英文映射
+        action_keywords = {
+          "download" => ["download", "下载", "save", "保存", "get", "获取"],
+          "search" => ["search", "搜索", "find", "查找", "query", "查询"],
+          "weather" => ["weather", "天气", "temperature", "温度"],
+          "video" => ["video", "视频", "youtube", "bilibili", "tiktok", "抖音"],
+          "audio" => ["audio", "音频", "music", "音乐", "sound", "声音", "mp3"],
+          "image" => ["image", "图片", "photo", "照片", "picture", "图"],
+          "transcribe" => ["transcribe", "转录", "transcript", "字幕", "transcription"],
+          "analyze" => ["analyze", "分析", "analysis", "统计", "analytics"],
+          "convert" => ["convert", "转换", "transform", "格式化", "format"],
+          "send" => ["send", "发送", "email", "邮件", "message", "消息"]
+        }
+        
+        # 扩展查询词 - 添加语义相关词
+        expanded_words = query_words.dup
+        query_words.each do |word|
+          action_keywords.each do |action, keywords|
+            if keywords.include?(word)
+              expanded_words << action unless expanded_words.include?(action)
+              # 添加同义词组中的其他词
+              expanded_words.concat(keywords.reject { |k| k == word })
+            end
+          end
+        end
+        expanded_words.uniq!
+        
+        skills = SmartBot::Skill.registry
+        matches = []
+        
+        skills.each do |name, skill|
+          name_str = name.to_s.downcase
+          desc = skill.description.to_s.downcase
+          
+          # 计算匹配分数
+          score = 0
+          
+          # 1. 名称完全匹配 (最高优先级)
+          score += 200 if name_str == query
+          
+          # 2. 名称包含完整查询词
+          score += 100 if name_str.include?(query)
+          
+          # 3. 多个查询词都匹配名称（重要！）
+          name_matches = query_words.count { |w| w.length >= 2 && name_str.include?(w) }
+          score += name_matches * 60
+          
+          # 4. 查询词包含名称（短名称匹配）
+          score += 50 if query.include?(name_str) && name_str.length > 2
+          
+          # 5. 描述包含完整查询
+          score += 40 if desc.include?(query)
+          
+          # 6. 扩展词匹配（处理中英文语义）
+          expanded_words.each do |word|
+            next if word.length < 2
+            
+            # 名称匹配权重更高
+            if name_str.include?(word)
+              score += 35
+            end
+            
+            # 描述匹配 - 加权
+            if desc.include?(word)
+              score += 20
+              # 描述开头的匹配权重更高
+              score += 25 if desc.start_with?(word)
+              # 在 "Use when" 或 "Triggers on" 语句中的匹配
+              score += 30 if desc =~ /use when.*#{word}/ || desc =~ /triggers on.*#{word}/
+            end
+          end
+          
+          # 7. 原始查询词匹配（基础分）
+          query_words.each do |word|
+            next if word.length < 2
+            score += 10 if name_str.include?(word)
+            score += 5 if desc.include?(word)
+          end
+          
+          # 8. 关键词提取匹配（从描述中提取的关键词）
+          keywords = extract_keywords(desc)
+          query_keywords = extract_keywords(query)
+          common = keywords & query_keywords
+          score += common.length * 25
+          
+          # 9. 工具名称匹配
+          skill.tools.each do |tool|
+            tool_name = tool[:name].to_s.downcase
+            score += 35 if tool_name.include?(query)
+            query_words.each do |word|
+              next if word.length < 2
+              score += 15 if tool_name.include?(word)
+            end
+            # 扩展词匹配
+            expanded_words.each do |word|
+              next if word.length < 2
+              score += 20 if tool_name.include?(word)
+            end
+          end
+          
+          # 10. 动作语义匹配 - 检测查询中的动作意图
+          action_keywords.each do |action, keywords|
+            if keywords.any? { |k| query.include?(k) }
+              # skill 名称或描述包含相关动作
+              if name_str.include?(action) || desc.include?(action)
+                score += 60
+              end
+              # 检查工具名称
+              skill.tools.each do |tool|
+                if tool[:name].to_s.downcase.include?(action)
+                  score += 40
+                end
+              end
+            end
+          end
+          
+          matches << { name: name, skill: skill, score: score } if score > 0
+        end
+        
+        # 按分数排序并返回前 N 个
+        matches.sort_by { |m| -m[:score] }.first(limit)
+      end
+      
+      # 提取关键词（简单的 TF-IDF 近似）
+      def extract_keywords(text)
+        # 常见停用词
+        stopwords = %w[a an and are as at be by for from has he in is it its of on that the to was will with 的 是 在 和 了 有 我 他 她 它 你 这 那 个 上 下 中 就 都 而 及 与 或 等]
+        
+        # 提取单词（包括中文）
+        words = text.downcase.scan(/[a-z]+|[\u4e00-\u9fa5]/)
+        words.reject { |w| stopwords.include?(w) || w.length < 2 }
+      end
+      
+      # 智能技能推荐 - 结合模糊匹配和 LLM 选择
+      def smart_skill_suggest(message, llm_name, limit = 3)
+        # 首先尝试显式指定
+        explicit = detect_explicit_skill(message)
+        return [{ name: explicit, confidence: :explicit }] if explicit
+        
+        # 模糊匹配获取候选
+        candidates = fuzzy_find_skill(message, 10)
+        return [] if candidates.empty?
+        
+        # 如果只有一个高置信度匹配，直接返回
+        return [{ name: candidates.first[:name], confidence: :high }] if candidates.first[:score] >= 80
+        
+        # 如果有多个候选，使用 LLM 进行选择
+        if candidates.length > 1 && candidates.first[:score] >= 30
+          # 构建候选列表
+          candidate_list = candidates.first(limit).map do |c|
+            "- #{c[:name]}: #{c[:skill].description}"
+          end.join("\n")
+          
+          selection_prompt = <<~PROMPT
+            用户请求: #{message}
+
+            候选技能（按相关度排序）:
+            #{candidate_list}
+
+            请判断哪个技能最适合处理用户的请求。
+            如果没有任何技能匹配，请回复 "none"。
+            如果有匹配的技能，请只回复技能名称。
+            只输出技能名称，不要解释。
+          PROMPT
+
+          begin
+            engine = SmartPrompt::Engine.new(File.expand_path("~/.smart_bot/smart_prompt.yml"))
+            
+            worker_name = :"skill_selector_#{Time.now.to_i}"
+            SmartPrompt.define_worker worker_name do
+              use llm_name
+              sys_msg "You are a skill selector. Choose the best skill for the user's request."
+              prompt params[:text]
+              send_msg
+            end
+
+            selected = engine.call_worker(worker_name, { text: selection_prompt }).strip.downcase
+            
+            if selected != "none" && !selected.empty?
+              # 标准化名称
+              selected = selected.gsub(/[^a-z0-9_]/, "_").gsub(/_+/, "_").gsub(/^_+|_$/, "")
+              # 验证存在
+              if SmartBot::Skill.find(selected.to_sym) || SmartBot::Skill.find(selected)
+                return [{ name: selected, confidence: :llm_selected }]
+              end
+            end
+          rescue => e
+            SmartBot.logger&.debug "LLM skill selection failed: #{e.message}"
+          end
+        end
+        
+        # 返回最佳模糊匹配
+        candidates.first(limit).map { |c| { name: c[:name], confidence: :fuzzy, score: c[:score] } }
+      end
       
       # 根据 skill 名称直接调用
       def call_skill_by_name(skill_name, message, urls, llm_name)
@@ -731,14 +976,29 @@ module SmartBot
 
         say "🛠️  正在使用技能: #{skill_name}", :cyan
 
-        # 首先尝试查找脚本工具（非 _agent 结尾的工具）
-        # 例如 youtube_downloader 可能有 download_video 脚本工具
+        # 首先尝试查找真正的脚本工具（有对应的脚本文件在 scripts/ 目录）
+        config = skill.config rescue {}
+        skill_path = config[:skill_path]
+        scripts_dir = skill_path ? File.join(skill_path, "scripts") : nil
+        
         script_tools = skill.tools.reject { |t| t[:name].to_s.end_with?('_agent') }
         
-        if script_tools.any?
-          # 有脚本工具，构建参数并执行
-          script_tool = script_tools.first
-          tool_name = script_tool[:name]
+        # 检查是否是真正的脚本工具（有对应的脚本文件）
+        real_script_tool = script_tools.find do |t|
+          tool_name = t[:name].to_s
+          # 检查 scripts 目录下是否有对应的脚本文件
+          if scripts_dir && Dir.exist?(scripts_dir)
+            # 提取基础名称（去掉 skill 前缀）
+            base_name = tool_name.to_s.sub(/^#{skill_name}_/, "")
+            Dir.glob(File.join(scripts_dir, "*")).any? { |f| File.basename(f, ".*") == base_name }
+          else
+            false
+          end
+        end
+        
+        if real_script_tool
+          # 有真正的脚本工具，构建参数并执行
+          tool_name = real_script_tool[:name]
           
           tool = SmartAgent::Tool.find_tool(tool_name)
           unless tool
@@ -747,7 +1007,6 @@ module SmartBot
           end
 
           # 构建脚本参数
-          # 提取 URL 作为参数
           url = urls.first || ""
           args = url
           
@@ -765,32 +1024,66 @@ module SmartBot
             return result.to_s
           end
         else
-          # 没有脚本工具，调用 _agent 工具
-          agent_tool_name = :"#{skill_name}_agent"
-          agent_tool = skill.tools.find { |t| t[:name] == agent_tool_name || t[:name].to_s == agent_tool_name.to_s }
+          # 没有真正的脚本工具，尝试调用第一个非 _agent 工具或 _agent 工具
+          # 优先尝试非 _agent 工具（如 smart_search）
+          target_tool = script_tools.first
           
-          unless agent_tool
-            SmartBot.logger&.debug "Agent tool not found: #{agent_tool_name}"
+          # 如果没有非 _agent 工具，尝试 _agent 工具
+          unless target_tool
+            agent_tool_name = :"#{skill_name}_agent"
+            target_tool = skill.tools.find { |t| t[:name] == agent_tool_name || t[:name].to_s == agent_tool_name.to_s }
+          end
+          
+          unless target_tool
+            SmartBot.logger&.debug "No suitable tool found for skill: #{skill_name}"
             return nil
           end
 
-          tool = SmartAgent::Tool.find_tool(agent_tool_name)
+          tool = SmartAgent::Tool.find_tool(target_tool[:name])
           unless tool
-            SmartBot.logger&.debug "SmartAgent tool not found: #{agent_tool_name}"
+            SmartBot.logger&.debug "SmartAgent tool not found: #{target_tool[:name]}"
             return nil
           end
 
-          # 如果有 URL，包含在 context 中
-          context = urls.any? ? "包含的URL: #{urls.join(', ')}" : ""
+          # 构建调用参数
+          tool_name = target_tool[:name].to_s
           
-          SmartBot.logger&.debug "Calling tool #{agent_tool_name} with task: #{message[0..50]}..."
-          
-          result = tool.call({ 
-            "task" => message,
-            "context" => context
-          })
+          if tool_name.end_with?('_agent')
+            # 调用 agent 工具
+            context = urls.any? ? "包含的URL: #{urls.join(', ')}" : ""
+            result = tool.call({ 
+              "task" => message,
+              "context" => context
+            })
+          else
+            # 调用普通工具（如 smart_search）
+            # 提取搜索关键词或任务
+            query = message.gsub(/用#{skill_name}/, "").gsub(/#{skill_name}/, "").strip
+            query = urls.first if urls.any? && query.empty?
+            
+            say "🔍 执行: #{tool_name}", :cyan
+            
+            result = tool.call({ 
+              "query" => query,
+              "count" => 5
+            })
+          end
 
-          result[:result] if result.is_a?(Hash) && result[:result]
+          if result.is_a?(Hash)
+            if result[:error]
+              return "❌ 执行失败: #{result[:error]}"
+            elsif result[:results]
+              # 格式化搜索结果
+              results_text = result[:results].map.with_index(1) do |r, i|
+                "#{i}. #{r[:title]}\n   #{r[:url]}\n   #{r[:description]}"
+              end.join("\n\n")
+              return "搜索结果:\n#{results_text}"
+            else
+              return result.to_s
+            end
+          else
+            return result.to_s
+          end
         end
       rescue => e
         SmartBot.logger&.warn "Skill execution failed: #{e.message}"
@@ -879,6 +1172,7 @@ module SmartBot
           say "  /models              - List available LLMs"
           say "  /llm <name>          - Switch LLM provider"
           say "  /skills [offset]     - List skills (default: first 40)"
+          say "  /find <keyword>      - Search skills by keyword"
           say "  /skill_help <name>   - Show detailed help for a skill"
           say "  /new                 - Start a new conversation (clear history)"
           say "  /help                - Show this help"
@@ -911,25 +1205,25 @@ module SmartBot
           # 解析分页参数: /skills [offset]
           offset = args.first.to_i
           offset = 0 if offset < 0
-          
+
           all_skills = SmartBot::Skill.registry.to_a
           total = all_skills.length
-          
+
           if total == 0
             say "\n🛠️  No skills loaded", :yellow
           else
             per_page = 40
             start_idx = offset
             end_idx = [offset + per_page, total].min
-            
+
             say "\n🛠️  Skills (#{start_idx + 1}-#{end_idx} of #{total}):\n"
-            
+
             all_skills[start_idx...end_idx].each do |name, skill|
               desc = skill.description.to_s[0..60]
               desc += "..." if skill.description.to_s.length > 60
               say "  • #{set_color(name.to_s, :green)} - #{desc}"
             end
-            
+
             # 显示分页提示
             if end_idx < total
               say "\n  ... and #{total - end_idx} more"
@@ -937,6 +1231,42 @@ module SmartBot
             end
             say ""
           end
+
+        when "/find"
+          if args.empty?
+            say "Usage: /find <keyword>", :yellow
+            say "Example: /find download   # 搜索下载相关技能"
+            say "         /find youtube    # 搜索 YouTube 相关技能"
+            say "         /find 天气        # 搜索天气相关技能"
+            return
+          end
+
+          keyword = args.join(" ")
+          matches = fuzzy_find_skill(keyword, 10)
+
+          if matches.empty?
+            say "\n🔍 No skills found matching '#{keyword}'", :yellow
+            say "Try different keywords or use /skills to browse all"
+          else
+            say "\n🔍 Skills matching '#{keyword}' (top #{matches.length}):\n"
+            matches.each_with_index do |match, idx|
+              name = match[:name]
+              skill = match[:skill]
+              score = match[:score]
+              desc = skill.description.to_s[0..70]
+              desc += "..." if skill.description.to_s.length > 70
+
+              # 根据分数显示不同颜色
+              color = score >= 80 ? :green : (score >= 40 ? :yellow : :dim)
+              confidence = score >= 80 ? "★★★" : (score >= 40 ? "★★" : "★")
+
+              say "  #{confidence} #{set_color(name.to_s, color, :bold)}"
+              say "     #{desc}"
+              say ""
+            end
+            say "Use '#{set_color("用 <skill_name> ", :cyan)}<your task>' to use a skill"
+          end
+          say ""
 
         when "/skill_help"
           if args.empty?
