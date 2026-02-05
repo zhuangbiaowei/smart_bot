@@ -38,12 +38,28 @@ module SmartBot
         
         if options[:message]
           # 单次对话模式
-          response = chat_with_tools(options[:message], current_llm)
-          say "\n🤖 #{response}"
+          message = options[:message]
+          
+          # 处理斜杠命令
+          if message.start_with?("/")
+            handle_command(message, smart_prompt_config, current_llm)
+          else
+            response = chat_with_tools(message, current_llm)
+            say "\n🤖 #{response}"
+          end
         else
-          # 交互模式
+          # 交互模式 - 使用 Conversation 维护对话历史
           say "🤖 SmartBot (powered by SmartAgent)"
-          say "   Commands: /models, /llm <name>, /skills, /help\n"
+          say "   Commands: /models, /llm <name>, /skills, /help"
+          say "   Use '/new' to start a new conversation\n"
+
+          # 创建 SmartPrompt Engine
+          sp_engine = SmartPrompt::Engine.new(File.expand_path("~/.smart_bot/smart_prompt.yml"))
+          
+          # 创建 Conversation 实例来维护对话历史
+          conversation = SmartPrompt::Conversation.new(sp_engine)
+          conversation.use(current_llm)
+          conversation.sys_msg("You are SmartBot, a helpful AI assistant. You have access to various tools and skills to help users.", with_history: false)
 
           loop do
             begin
@@ -53,11 +69,20 @@ module SmartBot
 
               # 处理斜杠命令
               if user_input.start_with?("/")
-                handle_command(user_input, smart_prompt_config, current_llm)
+                if user_input.strip == "/new"
+                  # 新建对话
+                  conversation = SmartPrompt::Conversation.new(sp_engine)
+                  conversation.use(current_llm)
+                  conversation.sys_msg("You are SmartBot, a helpful AI assistant.", with_history: false)
+                  say "\n🆕 New conversation started!\n", :green
+                else
+                  handle_command(user_input, smart_prompt_config, current_llm)
+                end
                 next
               end
 
-              response = chat_with_tools(user_input, current_llm)
+              # 使用对话历史进行多轮对话
+              response = chat_with_conversation(user_input, conversation, current_llm)
               say "\n🤖 #{response}\n"
               
             rescue Interrupt
@@ -161,28 +186,22 @@ module SmartBot
         url_pattern = %r{https?://[^\s]+}
         urls = message.scan(url_pattern)
         
-        # 检查是否是搜索请求
-        search_patterns = [
-          /^搜索[：:]?\s*(.+)/i,
-          /搜索\s+(.+)/i,
-          /search\s+for\s+(.+)/i,
-          /google\s+(.+)/i,
-          /bing\s+(.+)/i,
-          /baidu\s+(.+)/i,
-          /查找\s+(.+)/i
-        ]
-        
-        search_query = nil
-        search_patterns.each do |pattern|
-          if match = message.match(pattern)
-            search_query = match[1].strip
-            break
-          end
+        # ========== 1. 优先检查是否明确指定了 Skill ==========
+        # 检查用户是否明确提到了某个 skill 名称
+        explicit_skill = detect_explicit_skill(message)
+        if explicit_skill
+          skill_result = call_skill_by_name(explicit_skill, message, urls, llm_name)
+          return skill_result if skill_result
         end
         
-        # 检查是否是天气请求
+        # ========== 2. 智能 Skill 匹配 ==========
+        # 尝试使用已加载的 Markdown Skills
+        skill_result = try_markdown_skills(message, llm_name)
+        return skill_result if skill_result
+        
+        # ========== 3. 天气查询 ==========
         weather_match = message.match(/(.+?)(?:的)?天气/i) || message.match(/weather\s+(?:in|for)?\s+(.+)/i)
-        if weather_match && !search_query
+        if weather_match
           location = weather_match[1].strip
           # 移除常见后缀
           location = location.gsub(/今天|明天|后天|现在|怎么样|如何/, '').strip
@@ -206,6 +225,26 @@ module SmartBot
               💨  风速: #{result[:wind]}
               🤔  体感: #{result[:feels_like]}
             WEATHER
+          end
+        end
+        
+        # ========== 4. 搜索请求 ==========
+        # 检查是否是搜索请求
+        search_patterns = [
+          /^搜索[：:]?\s*(.+)/i,
+          /搜索\s+(.+)/i,
+          /search\s+for\s+(.+)/i,
+          /google\s+(.+)/i,
+          /bing\s+(.+)/i,
+          /baidu\s+(.+)/i,
+          /查找\s+(.+)/i
+        ]
+        
+        search_query = nil
+        search_patterns.each do |pattern|
+          if match = message.match(pattern)
+            search_query = match[1].strip
+            break
           end
         end
         
@@ -293,6 +332,7 @@ module SmartBot
           return call_llm(prompt, llm_name)
         end
         
+        # ========== 5. URL 抓取 ==========
         # 如果消息包含 URL，直接调用 web_fetch
         if urls.any?
           url = urls.first
@@ -340,12 +380,16 @@ module SmartBot
             return "文件内容:\n```\n#{tool_result[:content][0..2000]}\n```#{tool_result[:content].length > 2000 ? '\n...(已截断)' : ''}"
           end
         end
+
+        # 尝试使用已加载的 Markdown Skills
+        skill_result = try_markdown_skills(message, llm_name)
+        return skill_result if skill_result
         
         # 默认：直接调用 LLM
         call_llm(message, llm_name)
       end
 
-      # 调用 LLM
+      # 调用 LLM (单次对话模式)
       def call_llm(prompt, llm_name)
         engine = SmartPrompt::Engine.new(File.expand_path("~/.smart_bot/smart_prompt.yml"))
         
@@ -364,6 +408,121 @@ module SmartBot
         
         result = engine.call_worker(worker_name, { text: prompt })
         result
+      end
+      
+      # 使用 Conversation 进行多轮对话
+      def chat_with_conversation(message, conversation, llm_name)
+        # 先检查是否需要调用工具
+        url_pattern = %r{https?://[^\s]+}
+        urls = message.scan(url_pattern)
+        
+        # 检查是否是特殊命令（搜索、天气等）
+        # 这些仍然使用即时工具调用，不进入对话历史
+        
+        # ========== 1. 显式 Skill 调用 ==========
+        explicit_skill = detect_explicit_skill(message)
+        if explicit_skill
+          skill_result = call_skill_by_name(explicit_skill, message, urls, llm_name)
+          return skill_result if skill_result
+        end
+        
+        # ========== 2. 天气查询 ==========
+        weather_match = message.match(/(.+?)(?:的)?天气/i) || message.match(/weather\s+(?:in|for)?\s+(.+)/i)
+        if weather_match
+          location = weather_match[1].strip
+          location = location.gsub(/今天|明天|后天|现在|怎么样|如何/, '').strip
+          
+          tool = SmartAgent::Tool.find_tool(:get_weather)
+          if tool
+            result = tool.call({ "location" => location, "unit" => "c" })
+            if result[:error]
+              return "查询天气失败: #{result[:error]}"
+            end
+            weather_info = <<~WEATHER
+              #{result[:location]}, #{result[:country]} 当前天气:
+              🌡️ 温度: #{result[:temperature]}
+              📝 状况: #{result[:condition]}
+              💧 湿度: #{result[:humidity]}
+              💨 风速: #{result[:wind]}
+            WEATHER
+            # 将天气信息加入对话历史
+            conversation.add_message({ role: "assistant", content: weather_info })
+            return weather_info
+          end
+        end
+        
+        # ========== 3. 搜索请求 ==========
+        search_patterns = [
+          /^搜索[：:]?\s*(.+)/i,
+          /搜索\s+(.+)/i,
+          /search\s+for\s+(.+)/i,
+          /google\s+(.+)/i,
+          /bing\s+(.+)/i,
+          /baidu\s+(.+)/i,
+          /查找\s+(.+)/i
+        ]
+        
+        search_query = nil
+        search_patterns.each do |pattern|
+          if match = message.match(pattern)
+            search_query = match[1].strip
+            break
+          end
+        end
+        
+        if search_query
+          # 尝试 MCP 搜索
+          server_name = find_mcp_server_for_tool(:search)
+          if server_name
+            result = call_mcp_tool(server_name, "search", { "query" => search_query })
+            if result
+              return format_search_result(result, search_query, llm_name)
+            end
+          end
+        end
+        
+        # ========== 4. URL 抓取 ==========
+        if urls.any?
+          url = urls.first
+          tool_result = call_tool(:web_fetch, { "url" => url, "extract_mode" => "markdown" })
+          if tool_result && !tool_result[:error]
+            # 将网页内容作为上下文发送给 LLM
+            context = "网页标题: #{tool_result[:title]}\n\n网页内容:\n#{tool_result[:content][0..2000]}"
+            conversation.add_message({ role: "user", content: "#{message}\n\n[网页内容]\n#{context}" })
+            response = conversation.send_msg
+            return response
+          end
+        end
+        
+        # ========== 5. 普通对话（使用 Conversation 维护历史）==========
+        conversation.add_message({ role: "user", content: message })
+        response = conversation.send_msg
+        response
+      rescue => e
+        "Error: #{e.message}"
+      end
+      
+      # 格式化搜索结果
+      def format_search_result(result, query, llm_name)
+        result_hash = result.is_a?(Hash) ? result : { "content" => result.to_s }
+        content = result_hash["content"] || result_hash["text"] || result_hash.to_s
+        
+        # 简化返回结果
+        if content.is_a?(Array) && content.first.is_a?(Hash)
+          results = content
+          results = JSON.parse(content.first["text"]) if content.first["type"] == "text"
+          
+          if results.is_a?(Array) && results.first.is_a?(Hash)
+            formatted = results.first(5).map.with_index(1) do |r, i|
+              "#{i}. #{r["title"] || r["name"]}\n   #{r["link"] || r["url"]}\n   #{r["snippet"] || r["description"]}"
+            end.join("\n\n")
+            return "搜索结果:\n#{formatted}"
+          end
+        end
+        
+        content.to_s
+      rescue
+        "搜索完成，但无法解析结果"
       end
 
       # 调用工具
@@ -478,17 +637,15 @@ module SmartBot
       def load_and_activate_skills
         skills_dir = File.expand_path("~/smart_ai/smart_bot/skills")
         
-        # 加载所有 skill 文件
+        # 加载所有 skill 文件（原生 Ruby + Markdown Skills）
         SmartBot::Skill.load_all(skills_dir)
         
         # 激活所有已注册的 skills
         SmartBot::Skill.activate_all!
         
-        # 显示已加载的 skills
-        loaded_skills = SmartBot::Skill.list
-        if loaded_skills.any?
-          say "   Loaded skills: #{loaded_skills.join(', ')}", :green
-        end
+        # 简明显示加载数量
+        loaded_count = SmartBot::Skill.list.length
+        say "   Skills loaded: #{loaded_count}", :green if loaded_count > 0
       rescue => e
         say "⚠️  Failed to load skills: #{e.message}", :yellow
       end
@@ -537,6 +694,181 @@ module SmartBot
         nil
       end
 
+      # 检测用户是否明确指定了某个 skill
+      # 例如："用youtube_downloader下载视频" 或 "使用 invoice_organizer 整理发票"
+      def detect_explicit_skill(message)
+        # 匹配模式：
+        # - 用xxx skill
+        # - 使用xxx
+        # - 调用xxx
+        # - 通过xxx
+        patterns = [
+          /(?:用|使用|调用)\s*([a-z_][a-z0-9_-]*)/i,
+          /(?:用|使用|调用)\s*([a-z_][a-z0-9_-]*)\s*skill/i,
+          /([a-z_][a-z0-9_-]*)\s+skill/i,
+          /(?:via|using|with)\s+([a-z_][a-z0-9_-]*)/i
+        ]
+        
+        patterns.each do |pattern|
+          if match = message.match(pattern)
+            skill_name = match[1].downcase.strip
+            # 验证是否存在于已注册的 skills 中（支持 Symbol 和 String 两种 key）
+            return skill_name if SmartBot::Skill.find(skill_name.to_sym) || SmartBot::Skill.find(skill_name)
+          end
+        end
+        
+        nil
+      end
+      
+      # 根据 skill 名称直接调用
+      def call_skill_by_name(skill_name, message, urls, llm_name)
+        # 支持 Symbol 和 String 两种 key
+        skill = SmartBot::Skill.find(skill_name.to_sym) || SmartBot::Skill.find(skill_name)
+        unless skill
+          SmartBot.logger&.debug "Skill not found: #{skill_name}"
+          return nil
+        end
+
+        say "🛠️  正在使用技能: #{skill_name}", :cyan
+
+        # 首先尝试查找脚本工具（非 _agent 结尾的工具）
+        # 例如 youtube_downloader 可能有 download_video 脚本工具
+        script_tools = skill.tools.reject { |t| t[:name].to_s.end_with?('_agent') }
+        
+        if script_tools.any?
+          # 有脚本工具，构建参数并执行
+          script_tool = script_tools.first
+          tool_name = script_tool[:name]
+          
+          tool = SmartAgent::Tool.find_tool(tool_name)
+          unless tool
+            SmartBot.logger&.debug "Script tool not found: #{tool_name}"
+            return nil
+          end
+
+          # 构建脚本参数
+          # 提取 URL 作为参数
+          url = urls.first || ""
+          args = url
+          
+          say "📜 执行脚本: #{tool_name}", :cyan
+          
+          result = tool.call({ "args" => args })
+          
+          if result.is_a?(Hash)
+            if result[:success]
+              return "✅ 执行成功\n\n#{result[:output]}"
+            else
+              return "❌ 执行失败 (exit code: #{result[:exit_code]})\n\n#{result[:error]}"
+            end
+          else
+            return result.to_s
+          end
+        else
+          # 没有脚本工具，调用 _agent 工具
+          agent_tool_name = :"#{skill_name}_agent"
+          agent_tool = skill.tools.find { |t| t[:name] == agent_tool_name || t[:name].to_s == agent_tool_name.to_s }
+          
+          unless agent_tool
+            SmartBot.logger&.debug "Agent tool not found: #{agent_tool_name}"
+            return nil
+          end
+
+          tool = SmartAgent::Tool.find_tool(agent_tool_name)
+          unless tool
+            SmartBot.logger&.debug "SmartAgent tool not found: #{agent_tool_name}"
+            return nil
+          end
+
+          # 如果有 URL，包含在 context 中
+          context = urls.any? ? "包含的URL: #{urls.join(', ')}" : ""
+          
+          SmartBot.logger&.debug "Calling tool #{agent_tool_name} with task: #{message[0..50]}..."
+          
+          result = tool.call({ 
+            "task" => message,
+            "context" => context
+          })
+
+          result[:result] if result.is_a?(Hash) && result[:result]
+        end
+      rescue => e
+        SmartBot.logger&.warn "Skill execution failed: #{e.message}"
+        SmartBot.logger&.warn e.backtrace.first(5).join("\n")
+        nil
+      end
+
+      # 尝试使用 Markdown Skills
+      # 根据用户输入匹配合适的 skill 并调用
+      def try_markdown_skills(message, llm_name)
+        # 获取所有已注册的 skills
+        skills = SmartBot::Skill.registry
+        return nil if skills.empty?
+
+        # 构建技能列表和描述
+        skill_descriptions = skills.map do |name, skill|
+          "- #{name}: #{skill.description}"
+        end.join("\n")
+
+        # 创建一个简单的匹配提示词
+        selection_prompt = <<~PROMPT
+          用户输入: #{message}
+
+          可用技能:
+          #{skill_descriptions}
+
+          请判断哪个技能最适合处理用户的请求。
+          如果没有任何技能匹配，请回复 "none"。
+          如果有匹配的技能，请只回复技能名称（如：search, weather, invoice_organizer）。
+          只输出技能名称，不要解释。
+        PROMPT
+
+        # 调用 LLM 选择技能
+        engine = SmartPrompt::Engine.new(File.expand_path("~/.smart_bot/smart_prompt.yml"))
+        
+        worker_name = :"skill_selector_#{Time.now.to_i}"
+        SmartPrompt.define_worker worker_name do
+          use llm_name
+          sys_msg "You are a skill selector. Choose the best skill for the user's request."
+          prompt params[:text]
+          send_msg
+        end
+
+        selected_skill = engine.call_worker(worker_name, { text: selection_prompt }).strip.downcase
+        
+        # 如果没有匹配，返回 nil
+        return nil if selected_skill == "none" || selected_skill.empty?
+        
+        # 标准化技能名称
+        selected_skill = selected_skill.gsub(/[^a-z0-9_]/, "_").gsub(/_+/, "_").gsub(/^_+|_$/, "")
+        
+        # 查找对应的 skill（支持 Symbol 和 String 两种 key）
+        skill = skills[selected_skill.to_sym] || skills[selected_skill]
+        return nil unless skill
+
+        # 查找该 skill 的 _agent 工具
+        agent_tool_name = :"#{selected_skill}_agent"
+        agent_tool = skill.tools.find { |t| t[:name] == agent_tool_name || t[:name].to_s == agent_tool_name.to_s }
+        
+        return nil unless agent_tool
+
+        # 调用 skill 的 agent 工具
+        say "🛠️  正在使用技能: #{selected_skill}", :cyan
+        
+        tool = SmartAgent::Tool.find_tool(agent_tool_name)
+        return nil unless tool
+
+        result = tool.call({ 
+          "task" => message,
+          "context" => ""
+        })
+
+        result[:result] if result.is_a?(Hash) && result[:result]
+      rescue => e
+        SmartBot.logger&.warn "Markdown skill execution failed: #{e.message}"
+        nil
+      end
+
       # 处理斜杠命令
       def handle_command(input, config, current_llm)
         cmd, *args = input.split
@@ -544,11 +876,13 @@ module SmartBot
         case cmd
         when "/help"
           say "\n📖 Commands:"
-          say "  /models        - List available LLMs"
-          say "  /llm <name>   - Switch LLM provider"
-          say "  /skills        - List loaded skills"
-          say "  /help          - Show this help"
-          say "  Ctrl+C         - Exit\n"
+          say "  /models              - List available LLMs"
+          say "  /llm <name>          - Switch LLM provider"
+          say "  /skills [offset]     - List skills (default: first 40)"
+          say "  /skill_help <name>   - Show detailed help for a skill"
+          say "  /new                 - Start a new conversation (clear history)"
+          say "  /help                - Show this help"
+          say "  Ctrl+C               - Exit\n"
           
         when "/models"
           say "\n📋 Available LLMs:"
@@ -574,20 +908,91 @@ module SmartBot
           end
           
         when "/skills"
-          say "\n🛠️  Loaded Skills:\n"
+          # 解析分页参数: /skills [offset]
+          offset = args.first.to_i
+          offset = 0 if offset < 0
           
-          if SmartBot::Skill.list.empty?
-            say "   No skills loaded", :yellow
+          all_skills = SmartBot::Skill.registry.to_a
+          total = all_skills.length
+          
+          if total == 0
+            say "\n🛠️  No skills loaded", :yellow
           else
-            SmartBot::Skill.registry.each do |name, skill|
-              say "  • #{set_color(name.to_s, :green)} - #{skill.description}"
-              say "    Version: #{skill.version}, Author: #{skill.author}"
-              if skill.tools.any?
-                say "    Tools: #{skill.tools.map { |t| t[:name] }.join(', ')}"
-              end
-              say ""
+            per_page = 40
+            start_idx = offset
+            end_idx = [offset + per_page, total].min
+            
+            say "\n🛠️  Skills (#{start_idx + 1}-#{end_idx} of #{total}):\n"
+            
+            all_skills[start_idx...end_idx].each do |name, skill|
+              desc = skill.description.to_s[0..60]
+              desc += "..." if skill.description.to_s.length > 60
+              say "  • #{set_color(name.to_s, :green)} - #{desc}"
+            end
+            
+            # 显示分页提示
+            if end_idx < total
+              say "\n  ... and #{total - end_idx} more"
+              say "  Use /skills #{end_idx} to see more"
+            end
+            say ""
+          end
+
+        when "/skill_help"
+          if args.empty?
+            say "Usage: /skill_help <skill_name>", :yellow
+            say "Example: /skill_help youtube_downloader"
+            return
+          end
+          
+          skill_name = args.first
+          # 支持 Symbol 和 String 两种 key
+          skill = SmartBot::Skill.find(skill_name.to_sym) || SmartBot::Skill.find(skill_name)
+          
+          unless skill
+            say "❌ Skill '#{skill_name}' not found", :red
+            say "Use /skills to list available skills"
+            return
+          end
+          
+          say "\n📚 Skill: #{set_color(skill_name.to_s, :green, :bold)}\n"
+          say "Description: #{skill.description}"
+          say "Version: #{skill.version}"
+          say "Author: #{skill.author}"
+          
+          if skill.tools.any?
+            say "\nTools:"
+            skill.tools.each do |tool|
+              tool_desc = tool[:desc] || tool[:description] || "No description"
+              say "  • #{tool[:name]} - #{tool_desc}"
             end
           end
+          
+          # 尝试读取 SKILL.md 文件
+          config = skill.config rescue {}
+          skill_path = config[:skill_path]
+          
+          if skill_path
+            skill_md = File.join(skill_path, "SKILL.md")
+            if File.exist?(skill_md)
+              say "\n📖 SKILL.md Content:\n"
+              content = File.read(skill_md)
+              # 跳过 YAML frontmatter
+              if content =~ /\A---\s*\n.*\n---\s*\n(.*)/m
+                body = $1
+                # 显示前 1000 字符
+                preview = body[0..1000].strip
+                say preview
+                say "\n... (truncated)" if body.length > 1000
+              else
+                preview = content[0..1000].strip
+                say preview
+                say "\n... (truncated)" if content.length > 1000
+              end
+            end
+          end
+          
+          say ""
           
         else
           say "Unknown command: #{cmd}. Type /help for available commands.", :yellow

@@ -12,7 +12,7 @@ module SmartBot
       # 注册一个 skill
       def register(name, &block)
         registry[name] = SkillDefinition.new(name, &block)
-        SmartAgent.logger&.info "Registered skill: #{name}"
+        # 静默注册，不再输出日志
       end
 
       # 查找 skill
@@ -26,22 +26,13 @@ module SmartBot
       end
 
       # 加载所有 skills
+      # 支持原生 Ruby Skills 和 Markdown Skills (awesome-claude-skills 格式)
       def load_all(skills_dir = nil)
         skills_dir ||= File.expand_path("~/smart_ai/smart_bot/skills")
-        return unless File.directory?(skills_dir)
-
-        # 按顺序加载: 先加载核心 skill，再加载其他
-        skill_files = Dir.glob(File.join(skills_dir, "*/skill.rb")).sort
         
-        skill_files.each do |file|
-          begin
-            load file
-            skill_name = File.basename(File.dirname(file))
-            SmartAgent.logger&.info "Loaded skill file: #{skill_name}"
-          rescue => e
-            SmartAgent.logger&.error "Failed to load skill #{file}: #{e.message}"
-          end
-        end
+        # 使用 UnifiedSkillLoader 加载所有类型的 skills
+        require_relative "skill_adapters" unless defined?(SmartBot::SkillAdapters)
+        SmartBot::SkillAdapters::UnifiedSkillLoader.load_all(skills_dir)
       end
 
       # 激活所有已注册的 skills
@@ -49,9 +40,9 @@ module SmartBot
         registry.each do |name, skill|
           begin
             skill.activate!
-            SmartAgent.logger&.info "Activated skill: #{name}"
-          rescue => e
-            SmartAgent.logger&.error "Failed to activate skill #{name}: #{e.message}"
+            # 静默激活，不再输出日志
+          rescue
+            # 静默跳过激活失败的 skill
           end
         end
       end
@@ -89,8 +80,8 @@ module SmartBot
       end
 
       # 注册工具
-      def register_tool(tool_name, &block)
-        @tools << { name: tool_name, block: block }
+      def register_tool(tool_name, desc = nil, &block)
+        @tools << { name: tool_name, desc: desc, block: block }
       end
 
       # 注册命令
@@ -115,6 +106,9 @@ module SmartBot
 
       # 激活 skill
       def activate!
+        # 确保 SmartAgent.logger 已设置
+        SmartAgent.logger ||= SmartBot.logger
+        
         # 注册工具
         @tools.each do |tool_def|
           # 工具将在 SmartAgent 中注册

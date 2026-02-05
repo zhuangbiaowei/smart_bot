@@ -26,6 +26,6 @@ end
 # 构建 SmartBot Agent - 工具在这里定义
 SmartAgent.build_agent(
   :smart_bot,
-  # mcp_servers: [:all_in_one],
+  mcp_servers: [:all_in_one],
   tools: [:read_file, :write_file, :edit_file, :list_dir, :exec, :web_fetch],
 )
