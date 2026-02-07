@@ -46,6 +46,7 @@ SmartBot 构建于 **SmartAgent** 和 **SmartPrompt** 框架之上：
 | `exec` | 执行 shell 命令 |
 | `web_search` | 网络搜索（需要 Brave API Key） |
 | `web_fetch` | 抓取网页内容 |
+| `run_skill` | 将子任务委派给指定 Skill（带深度/循环保护） |
 
 ## 快速开始
 
@@ -156,8 +157,15 @@ smart_bot agent -s "project1" -m "记住这是项目1"
 | `/models` | 列出所有可用 LLM 提供商 |
 | `/llm <name>` | 切换到指定提供商 |
 | `/skills` | 列出已加载的 Skills |
+| `/run_skill <skill> <task>` | 将子任务委派给指定 Skill |
 | `/help` | 显示帮助信息 |
 | `Ctrl+C` | 退出交互模式 |
+
+`run_skill` 也支持直接作为消息输入：
+
+```text
+run_skill invoice_organizer: 整理 ./receipts 下发票并输出 CSV
+```
 
 ## 项目结构
 

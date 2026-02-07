@@ -2,6 +2,8 @@
 
 require "json"
 require "pathname"
+require_relative "../skill_routing/orchestrator"
+require_relative "../tools/run_skill"
 
 module SmartBot
   module Agent
@@ -26,6 +28,10 @@ module SmartBot
           model: @model,
           brave_api_key: brave_api_key
         )
+        @skill_orchestrator = SkillRouting::Orchestrator.new(
+          workspace: workspace,
+          subagent_manager: @subagents
+        )
         
         @running = false
         register_default_tools
@@ -45,6 +51,9 @@ module SmartBot
         
         spawn_tool = Tools::SpawnTool.new(@subagents)
         @tools.register(spawn_tool)
+
+        run_skill_tool = Tools::RunSkillTool.new(@skill_orchestrator)
+        @tools.register(run_skill_tool)
       end
 
       def run
@@ -100,6 +109,9 @@ module SmartBot
         
         spawn_tool = @tools.get(:spawn)
         spawn_tool.set_context(msg.channel, msg.chat_id) if spawn_tool
+
+        run_skill_tool = @tools.get(:run_skill)
+        run_skill_tool.set_context(msg.channel, msg.chat_id) if run_skill_tool
 
         messages = @context.build_messages(
           history: session.get_history,
@@ -178,6 +190,9 @@ module SmartBot
         
         spawn_tool = @tools.get(:spawn)
         spawn_tool.set_context(origin_channel, origin_chat_id) if spawn_tool
+
+        run_skill_tool = @tools.get(:run_skill)
+        run_skill_tool.set_context(origin_channel, origin_chat_id) if run_skill_tool
 
         messages = @context.build_messages(
           history: session.get_history,

@@ -77,6 +77,7 @@ module SmartBot
         "- Read, write, and edit files\n" \
         "- Execute shell commands\n" \
         "- Search the web and fetch web pages\n" \
+        "- Delegate subtasks to specific skills\n" \
         "- Send messages to users on chat channels\n" \
         "- Spawn subagents for complex background tasks\n\n" \
         "## Current Time\n#{now}\n\n" \

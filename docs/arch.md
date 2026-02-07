@@ -109,6 +109,7 @@ result = @tools.execute(:read_file, { path: "file.txt" })
 | `WebFetchTool` | 网页抓取 | 安全 |
 | `MessageTool` | 发送消息 | 安全 |
 | `SpawnTool` | 生成子代理 | 安全 |
+| `RunSkillTool` | 委派子任务给指定 Skill | 中等 |
 
 #### 工具定义格式 (OpenAI Function Calling)
 ```ruby

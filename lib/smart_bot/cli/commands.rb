@@ -2,6 +2,7 @@
 
 require "thor"
 require "yaml"
+require "shellwords"
 
 module SmartBot
   module CLI
@@ -186,6 +187,10 @@ module SmartBot
         # 检查是否需要调用工具
         url_pattern = %r{https?://[^\s]+}
         urls = message.scan(url_pattern)
+
+        # ========== 0. 显式 run_skill 委派 ==========
+        delegated = try_run_skill_delegation(message, llm_name)
+        return delegated if delegated
         
         # ========== 1. 优先检查是否明确指定了 Skill ==========
         # 检查用户是否明确提到了某个 skill 名称
@@ -449,6 +454,10 @@ module SmartBot
         # 先检查是否需要调用工具
         url_pattern = %r{https?://[^\s]+}
         urls = message.scan(url_pattern)
+
+        # 显式 run_skill 委派（不进入会话历史）
+        delegated = try_run_skill_delegation(message, llm_name)
+        return delegated if delegated
         
         # 检查是否是特殊命令（搜索、天气等）
         # 这些仍然使用即时工具调用，不进入对话历史
@@ -574,6 +583,213 @@ module SmartBot
         return { error: "Tool not found: #{tool_name}" } unless tool
         
         tool.call(params)
+      end
+
+      # 解析 run_skill 语法并执行委派
+      # 支持:
+      # - run_skill skill_name: task details
+      # - run_skill skill_name task details
+      # - 用run_skill 调用 skill_name: task details
+      def try_run_skill_delegation(message, llm_name)
+        payload = parse_run_skill_request(message)
+        return nil unless payload
+
+        execute_run_skill(
+          skill_name: payload[:skill_name],
+          task: payload[:task],
+          max_depth: payload[:max_depth],
+          chain: payload[:chain],
+          parent_skill: payload[:parent_skill],
+          llm_name: llm_name
+        )
+      end
+
+      def parse_run_skill_request(message)
+        text = message.to_s.strip
+        return nil if text.empty?
+
+        # run_skill <skill>[: ]<task>
+        pattern = /(?:^|\s)(?:用\s*)?run_skill\s+([a-z_][a-z0-9_-]*)\s*(?::|\s)\s*(.+)\z/i
+        match = text.match(pattern)
+        return nil unless match
+
+        skill_name = normalize_skill_name(match[1])
+        task_text = match[2].to_s.strip
+        return nil if skill_name.empty? || task_text.empty?
+
+        max_depth = nil
+        # 可选参数: "max_depth=3"
+        if task_text =~ /\bmax_depth\s*=\s*(\d+)\b/i
+          max_depth = Regexp.last_match(1).to_i
+          task_text = task_text.sub(/\bmax_depth\s*=\s*\d+\b/i, "").strip
+        end
+
+        {
+          skill_name: skill_name,
+          task: task_text,
+          max_depth: max_depth,
+          chain: nil,
+          parent_skill: nil
+        }
+      end
+
+      def execute_run_skill(skill_name:, task:, llm_name:, parent_skill: nil, chain: nil, max_depth: nil)
+        current_chain = parse_chain(chain)
+        normalized_skill = normalize_skill_name(skill_name)
+        return "run_skill error: invalid skill_name" if normalized_skill.empty?
+        return "run_skill error: task is required" if task.to_s.strip.empty?
+
+        current_chain << normalize_skill_name(parent_skill) unless parent_skill.to_s.strip.empty?
+        current_chain = current_chain.reject(&:empty?)
+
+        effective_max_depth = max_depth.to_i > 0 ? max_depth.to_i : 2
+
+        if current_chain.include?(normalized_skill)
+          cycle = (current_chain + [normalized_skill]).join(" -> ")
+          return "run_skill error: delegation cycle detected (#{cycle})"
+        end
+
+        if current_chain.length >= effective_max_depth
+          return "run_skill error: delegation depth limit reached (max_depth=#{effective_max_depth})"
+        end
+
+        # 验证 skill 存在
+        skill = SmartBot::Skill.find(normalized_skill.to_sym) || SmartBot::Skill.find(normalized_skill)
+        return "run_skill error: skill not found: #{normalized_skill}" unless skill
+
+        verification = build_youtube_summary_verification(skill_name: normalized_skill, task: task)
+        if verification && verification[:error]
+          return "run_skill error: #{verification[:error]}"
+        end
+
+        task_for_skill = task
+        task_for_skill = "#{task}\n\n#{verification[:context]}" if verification
+
+        say "🔁 run_skill -> #{normalized_skill}", :cyan
+
+        task_urls = task_for_skill.scan(%r{https?://[^\s]+})
+        result = call_skill_by_name(normalized_skill, task_for_skill, task_urls, llm_name)
+        return "run_skill error: delegated skill execution failed: #{normalized_skill}" if result.nil?
+
+        if verification
+          result = format_verified_skill_result(result: result, verification: verification)
+        end
+
+        next_chain = current_chain + [normalized_skill]
+        <<~TEXT.strip
+          run_skill delegated: #{normalized_skill}
+          chain: #{next_chain.join(" -> ")}
+
+          #{result}
+        TEXT
+      end
+
+      def parse_chain(chain)
+        return [] if chain.nil?
+        return chain.map { |item| normalize_skill_name(item) } if chain.is_a?(Array)
+        return [] unless chain.is_a?(String)
+
+        chain.split(/\s*(?:->|>)\s*/).map { |item| normalize_skill_name(item) }
+      end
+
+      def normalize_skill_name(name)
+        name.to_s.strip.downcase.gsub(/[^a-z0-9_]/, "_").gsub(/_+/, "_").gsub(/^_+|_+$/, "")
+      end
+
+      def build_youtube_summary_verification(skill_name:, task:)
+        return nil unless skill_name.include?("youtube") && skill_name.include?("summar")
+
+        url = extract_youtube_url(task)
+        return { error: "youtube summary requires a valid YouTube URL in task" } unless url
+
+        meta = fetch_youtube_metadata(url)
+        return { error: "failed to verify video metadata via yt-dlp: #{meta[:error]}" } if meta[:error]
+
+        title = meta[:title]
+        channel = meta[:channel]
+        upload_date = meta[:upload_date]
+        duration = meta[:duration]
+
+        context = <<~CTX.strip
+          Verified facts from yt-dlp (must treat these as source of truth):
+          - url: #{url}
+          - title: #{title}
+          - channel: #{channel}
+          - upload_date: #{upload_date}
+          - duration_seconds: #{duration}
+
+          Guardrails:
+          - Do not claim you fetched metadata unless it matches the verified facts above.
+          - If your analysis conflicts with verified title/channel, state uncertainty and do not invent replacements.
+        CTX
+
+        {
+          url: url,
+          title: title,
+          channel: channel,
+          upload_date: upload_date,
+          duration: duration,
+          context: context
+        }
+      end
+
+      def extract_youtube_url(text)
+        return nil if text.to_s.empty?
+
+        urls = text.scan(%r{https?://[^\s]+})
+        urls.find { |u| u.include?("youtube.com/") || u.include?("youtu.be/") }
+      end
+
+      def fetch_youtube_metadata(url)
+        cmd = "yt-dlp --dump-json --skip-download --no-warnings #{Shellwords.escape(url)} 2>/dev/null"
+        output = `#{cmd}`
+        status = $?.exitstatus
+        return { error: "yt-dlp command failed with exit code #{status}" } unless status == 0
+        return { error: "yt-dlp returned empty output" } if output.to_s.strip.empty?
+
+        data = JSON.parse(output)
+        {
+          title: data["title"].to_s.strip,
+          channel: (data["channel"] || data["uploader"] || "unknown").to_s.strip,
+          upload_date: (data["upload_date"] || "unknown").to_s.strip,
+          duration: data["duration"].to_i
+        }
+      rescue JSON::ParserError => e
+        { error: "invalid yt-dlp JSON: #{e.message}" }
+      rescue => e
+        { error: e.message }
+      end
+
+      def format_verified_skill_result(result:, verification:)
+        body = result.to_s
+        warning = detect_title_mismatch_warning(body, verification[:title])
+
+        lines = []
+        lines << "yt-dlp verified:"
+        lines << "- title: #{verification[:title]}"
+        lines << "- channel: #{verification[:channel]}"
+        lines << "- upload_date: #{verification[:upload_date]}"
+        lines << "- duration_seconds: #{verification[:duration]}"
+        lines << ""
+        lines << warning if warning
+        lines << body
+        lines.join("\n")
+      end
+
+      def detect_title_mismatch_warning(text, verified_title)
+        claimed = text[/视频标题\s*[:：]\s*(.+)/, 1] || text[/标题\s*[:：]\s*(.+)/, 1]
+        return nil unless claimed
+
+        normalized_claimed = normalize_compare_text(claimed)
+        normalized_verified = normalize_compare_text(verified_title)
+        return nil if normalized_claimed.empty? || normalized_verified.empty?
+        return nil if normalized_claimed.include?(normalized_verified) || normalized_verified.include?(normalized_claimed)
+
+        "⚠️ 检测到技能输出标题与 yt-dlp 取证不一致，以上述取证结果为准。"
+      end
+
+      def normalize_compare_text(text)
+        text.to_s.downcase.gsub(/["'“”‘’\s]/, "").gsub(/[^[:alnum:]\p{Han}]/, "")
       end
 
       # 尝试使用 MCP 搜索
@@ -1072,6 +1288,11 @@ module SmartBot
           if result.is_a?(Hash)
             if result[:error]
               return "❌ 执行失败: #{result[:error]}"
+            elsif result[:result]
+              # Claude-style skill agent usually returns { result: "...", skill: "..." }
+              return result[:result].to_s
+            elsif result["result"]
+              return result["result"].to_s
             elsif result[:results]
               # 格式化搜索结果
               results_text = result[:results].map.with_index(1) do |r, i|
@@ -1174,6 +1395,7 @@ module SmartBot
           say "  /skills [offset]     - List skills (default: first 40)"
           say "  /find <keyword>      - Search skills by keyword"
           say "  /skill_help <name>   - Show detailed help for a skill"
+          say "  /run_skill <skill> <task> - Delegate task to a specific skill"
           say "  /new                 - Start a new conversation (clear history)"
           say "  /help                - Show this help"
           say "  Ctrl+C               - Exit\n"
@@ -1323,6 +1545,18 @@ module SmartBot
           end
           
           say ""
+
+        when "/run_skill"
+          if args.length < 2
+            say "Usage: /run_skill <skill_name> <task>", :yellow
+            say "Example: /run_skill invoice_organizer 整理 ./receipts 下的发票并输出CSV"
+            return
+          end
+
+          skill_name = args.shift
+          task = args.join(" ").strip
+          output = execute_run_skill(skill_name: skill_name, task: task, llm_name: current_llm)
+          say "\n#{output}\n"
           
         else
           say "Unknown command: #{cmd}. Type /help for available commands.", :yellow

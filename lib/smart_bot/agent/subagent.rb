@@ -2,6 +2,8 @@
 
 require "json"
 require "securerandom"
+require_relative "../skill_routing/orchestrator"
+require_relative "../tools/run_skill"
 
 module SmartBot
   module Agent
@@ -14,6 +16,10 @@ module SmartBot
         @brave_api_key = brave_api_key
         @running_tasks = {}
         @mutex = Mutex.new
+        @skill_orchestrator = SkillRouting::Orchestrator.new(
+          workspace: workspace,
+          subagent_manager: self
+        )
       end
 
       def spawn(task:, label: nil, origin_channel: "cli", origin_chat_id: "direct")
@@ -47,6 +53,14 @@ module SmartBot
           tools.register(Tools::ShellTool.new(working_dir: @workspace.to_s))
           tools.register(Tools::WebSearchTool.new(api_key: @brave_api_key))
           tools.register(Tools::WebFetchTool.new)
+          run_skill_tool = Tools::RunSkillTool.new(@skill_orchestrator)
+          run_skill_tool.set_context(origin[:channel], origin[:chat_id])
+          delegation_defaults = parse_delegation_defaults(task)
+          run_skill_tool.set_delegation_defaults(
+            chain: delegation_defaults[:chain],
+            parent_skill: delegation_defaults[:parent_skill]
+          )
+          tools.register(run_skill_tool)
 
           system_prompt = build_subagent_prompt(task)
           messages = [
@@ -138,6 +152,7 @@ module SmartBot
         "- Read and write files in the workspace\n" \
         "- Execute shell commands\n" \
         "- Search the web and fetch web pages\n" \
+        "- Delegate focused subtasks to another skill using run_skill\n" \
         "- Complete the task thoroughly\n\n" \
         "## What You Cannot Do\n" \
         "- Send messages directly to users (no message tool available)\n" \
@@ -150,6 +165,16 @@ module SmartBot
 
       def running_count
         @mutex.synchronize { @running_tasks.size }
+      end
+
+      def parse_delegation_defaults(task)
+        chain_match = task.match(/^\s*-\s*call_chain:\s*(.+?)\s*$/)
+        skill_match = task.match(/^\s*-\s*target_skill:\s*(.+?)\s*$/)
+
+        {
+          chain: chain_match ? chain_match[1].strip : nil,
+          parent_skill: skill_match ? skill_match[1].strip : nil
+        }
       end
     end
   end
