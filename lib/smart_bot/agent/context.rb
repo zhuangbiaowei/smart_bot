@@ -34,8 +34,16 @@ module SmartBot
 
         skills_summary = @skills.build_skills_summary
         if skills_summary
-          parts << "# Skills\n\nThe following skills extend your capabilities. " \
-                     "To use a skill, read its SKILL.md file using the read_file tool.\n\n#{skills_summary}"
+          parts << "# Skills\n\n" \
+                     "The following skills extend your capabilities. " \
+                     "When a user's request matches a skill's description, " \
+                     "you MUST use the run_skill tool to delegate the task to that skill. " \
+                     "Do not attempt to handle the task yourself if a suitable skill exists.\n\n" \
+                     "To use a skill:\n" \
+                     "1. Identify which skill matches the user's request based on the skill description\n" \
+                     "2. Use the run_skill tool with the skill_name and task parameters\n" \
+                     "3. Pass the user's original request as the task parameter\n\n" \
+                     "Available skills:\n#{skills_summary}"
         end
 
         parts.join("\n\n---\n\n")

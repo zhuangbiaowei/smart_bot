@@ -1,0 +1,64 @@
+metadata:
+  name: youtube_downloader
+  description: Download YouTube videos with customizable quality and format options
+  version: "1.0.0"
+  author: SmartBot
+
+spec:
+  type: script
+  triggers:
+    - download video
+    - download youtube
+    - save video
+    - grab video
+    - 下载视频
+    - 下载youtube
+    - 保存视频
+    - 视频下载
+    - youtube download
+    - video download
+    - downloader
+    - 下载器
+    - mp4
+    - mp3
+    - audio
+    - 音频
+  anti_triggers:
+    - summarize
+    - summary
+    - transcript
+    - 总结
+    - 摘要
+    - 转录
+  entrypoints:
+    - name: default
+      runtime: python
+      command: scripts/download_video.py
+      inputs:
+        url:
+          type: string
+          required: true
+          description: YouTube video URL
+        quality:
+          type: string
+          required: false
+          default: best
+          description: Video quality (best, 1080p, 720p, 480p, 360p)
+        format:
+          type: string
+          required: false
+          default: mp4
+          description: Output format (mp4, webm, mkv)
+
+permissions:
+  filesystem:
+    read:
+      - "~/smart_ai/smart_bot/skills/video-downloader/scripts"
+    write:
+      - "/mnt/user-data/outputs"
+  network:
+    outbound: true
+
+execution:
+  sandbox: process
+  timeout: 300

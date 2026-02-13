@@ -21,6 +21,11 @@ module SmartBot
             return false
           end
 
+          # Keep first-loaded skill when names collide (local workspace skills
+          # are loaded before external dirs), and avoid silent override.
+          existing = SmartBot::Skill.find(parser.name.to_sym) || SmartBot::Skill.find(parser.name)
+          return false if existing
+
           # 注册为 SmartBot Skill
           SmartBot::Skill.register parser.name do
             desc parser.description

@@ -1,0 +1,42 @@
+default:
+  image: ruby:3.3
+  before_script:
+    - apt-get update
+    - ruby -v
+    - which ruby
+    - gem install bundler --no-document
+    - bundle install --jobs $(nproc) "${FLAGS[@]}"
+
+unit tests:
+  script:
+    - bundle exec rake spec
+
+code_quality:
+  script:
+    - bundle exec rake quality:all
+
+unit tests ruby2.7:
+  image: ruby:2.7
+  before_script:
+    - apt-get update
+    - ruby -v
+    - which ruby
+    - gem install bundler -v 2.4.22 --no-document
+    - bundle install --jobs $(nproc) "${FLAGS[@]}"
+  script:
+    - bundle exec rake spec
+
+unit tests ruby3.0:
+  image: ruby:3.0
+  script:
+    - bundle exec rake spec
+
+unit tests ruby3.1:
+  image: ruby:3.1
+  script:
+    - bundle exec rake spec
+
+unit tests ruby3.2:
+  image: ruby:3.2
+  script:
+    - bundle exec rake spec

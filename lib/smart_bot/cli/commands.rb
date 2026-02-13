@@ -2,7 +2,12 @@
 
 require "thor"
 require "yaml"
+require "open3"
+require "timeout"
 require "shellwords"
+
+# Load enhanced command execution system
+require_relative "../skill_system/execution/enhanced_command_runner"
 
 module SmartBot
   module CLI
@@ -32,6 +37,9 @@ module SmartBot
         
         # 加载并激活所有 skills
         load_and_activate_skills
+        
+        # 初始化新的 Skill System
+        load_new_skill_system
         
         # 获取当前配置
         smart_prompt_config = YAML.load_file(File.expand_path("~/.smart_bot/smart_prompt.yml"))
@@ -142,10 +150,10 @@ module SmartBot
         say "\n然后运行: smart_bot agent"
       end
 
-      desc "skill NAME", "Create a new skill"
+      desc "skill create NAME", "Create a new skill"
       option :description, aliases: "-d", default: "A new skill", desc: "Skill description"
       option :author, aliases: "-a", default: "SmartBot User", desc: "Author name"
-      def skill(name)
+      def skill_create(name)
         # 验证名称
         unless name =~ /^[a-z][a-z0-9_]*$/
           say "❌ Invalid skill name. Use lowercase letters, numbers, and underscores only.", :red
@@ -180,6 +188,10 @@ module SmartBot
         say "   The skill will be automatically loaded when you run smart_bot agent"
       end
 
+      # Register SkillCommands as subcommand
+      require_relative "skill_commands"
+      register SkillCommands, "skill", "skill [COMMAND]", "Manage skills"
+
       private
 
       # 主要的对话逻辑 - 手动处理工具调用
@@ -188,25 +200,29 @@ module SmartBot
         url_pattern = %r{https?://[^\s]+}
         urls = message.scan(url_pattern)
 
-        # ========== 0. 显式 run_skill 委派 ==========
+        # ========== 0. 新的 Skill System 路由 ==========
+        skill_system_result = try_skill_system_route(message, llm_name)
+        return skill_system_result if skill_system_result
+
+        # ========== 1. 显式 run_skill 委派 ==========
         delegated = try_run_skill_delegation(message, llm_name)
         return delegated if delegated
-        
-        # ========== 1. 优先检查是否明确指定了 Skill ==========
+
+        # ========== 2. 优先检查是否明确指定了 Skill ==========
         # 检查用户是否明确提到了某个 skill 名称
         explicit_skill = detect_explicit_skill(message)
         if explicit_skill
           skill_result = call_skill_by_name(explicit_skill, message, urls, llm_name)
           return skill_result if skill_result
         end
-        
-        # ========== 2. 智能 Skill 推荐 ==========
+
+        # ========== 3. 智能 Skill 推荐 ==========
         # 使用模糊匹配 + LLM 选择来找到最佳技能
         suggestions = smart_skill_suggest(message, llm_name, 3)
-        
+
         if suggestions.any?
           best = suggestions.first
-          
+
           case best[:confidence]
           when :explicit
             # 已经在上面的显式检测中处理了
@@ -455,13 +471,17 @@ module SmartBot
         url_pattern = %r{https?://[^\s]+}
         urls = message.scan(url_pattern)
 
+        # ========== 0. 新的 Skill System 路由 ==========
+        skill_system_result = try_skill_system_route(message, llm_name)
+        return skill_system_result if skill_system_result
+
         # 显式 run_skill 委派（不进入会话历史）
         delegated = try_run_skill_delegation(message, llm_name)
         return delegated if delegated
-        
+
         # 检查是否是特殊命令（搜索、天气等）
         # 这些仍然使用即时工具调用，不进入对话历史
-        
+
         # ========== 1. 显式 Skill 调用 ==========
         explicit_skill = detect_explicit_skill(message)
         if explicit_skill
@@ -657,22 +677,41 @@ module SmartBot
         skill = SmartBot::Skill.find(normalized_skill.to_sym) || SmartBot::Skill.find(normalized_skill)
         return "run_skill error: skill not found: #{normalized_skill}" unless skill
 
-        verification = build_youtube_summary_verification(skill_name: normalized_skill, task: task)
-        if verification && verification[:error]
-          return "run_skill error: #{verification[:error]}"
-        end
-
-        task_for_skill = task
-        task_for_skill = "#{task}\n\n#{verification[:context]}" if verification
-
         say "🔁 run_skill -> #{normalized_skill}", :cyan
 
-        task_urls = task_for_skill.scan(%r{https?://[^\s]+})
-        result = call_skill_by_name(normalized_skill, task_for_skill, task_urls, llm_name)
+        grounded_task = build_grounding_guarded_task(task)
+        task_urls = grounded_task.scan(%r{https?://[^\s]+})
+        result = call_skill_by_name(
+          normalized_skill,
+          grounded_task,
+          task_urls,
+          llm_name,
+          require_evidence: true
+        )
         return "run_skill error: delegated skill execution failed: #{normalized_skill}" if result.nil?
+        if result.to_s.start_with?("❌ 该技能")
+          return "run_skill error: #{result}"
+        end
 
-        if verification
-          result = format_verified_skill_result(result: result, verification: verification)
+        # Generic anti-hallucination guard:
+        # If output is too assertive without required evidence structure,
+        # force one corrective retry with stricter constraints.
+        if grounding_structure_missing?(result.to_s) && grounding_risky_claims?(result.to_s)
+          retry_task = build_grounding_retry_task(original_task: task, previous_output: result.to_s)
+          retry_urls = retry_task.scan(%r{https?://[^\s]+})
+          retried = call_skill_by_name(
+            normalized_skill,
+            retry_task,
+            retry_urls,
+            llm_name,
+            require_evidence: true
+          )
+          if retried
+            if retried.to_s.start_with?("❌ 该技能")
+              return "run_skill error: #{retried}"
+            end
+            result = "⚠️ 首次结果缺少可验证依据，已自动触发一次防幻觉重试。\n\n#{retried}"
+          end
         end
 
         next_chain = current_chain + [normalized_skill]
@@ -696,100 +735,338 @@ module SmartBot
         name.to_s.strip.downcase.gsub(/[^a-z0-9_]/, "_").gsub(/_+/, "_").gsub(/^_+|_+$/, "")
       end
 
-      def build_youtube_summary_verification(skill_name:, task:)
-        return nil unless skill_name.include?("youtube") && skill_name.include?("summar")
+      def execute_skill_via_markdown(skill_name:, skill:, task:, urls:, llm_name:)
+        config = skill.config rescue {}
+        skill_path = config[:skill_path]
+        return nil unless skill_path
 
-        url = extract_youtube_url(task)
-        return { error: "youtube summary requires a valid YouTube URL in task" } unless url
+        skill_md = File.join(skill_path, "SKILL.md")
+        return nil unless File.exist?(skill_md)
 
-        meta = fetch_youtube_metadata(url)
-        return { error: "failed to verify video metadata via yt-dlp: #{meta[:error]}" } if meta[:error]
+        content = File.read(skill_md, encoding: "UTF-8")
+        commands = extract_bash_commands(content)
+        return nil if commands.empty?
 
-        title = meta[:title]
-        channel = meta[:channel]
-        upload_date = meta[:upload_date]
-        duration = meta[:duration]
+        selected = select_relevant_commands(commands, task: task, urls: urls).first(3)
+        return nil if selected.empty?
 
-        context = <<~CTX.strip
-          Verified facts from yt-dlp (must treat these as source of truth):
-          - url: #{url}
-          - title: #{title}
-          - channel: #{channel}
-          - upload_date: #{upload_date}
-          - duration_seconds: #{duration}
+        # Use enhanced command runner for validation, adaptation, and execution
+        runner = SkillSystem::Execution::EnhancedCommandRunner.new(
+          require_confirmation: false,
+          timeout: 30
+        )
 
-          Guardrails:
-          - Do not claim you fetched metadata unless it matches the verified facts above.
-          - If your analysis conflicts with verified title/channel, state uncertainty and do not invent replacements.
-        CTX
+        executed = []
+        blocked = []
 
-        {
-          url: url,
-          title: title,
-          channel: channel,
-          upload_date: upload_date,
-          duration: duration,
-          context: context
-        }
-      end
+        selected.each do |cmd|
+          unless command_allowed_for_evidence?(cmd)
+            blocked << { command: cmd, reason: "blocked by safety filter" }
+            next
+          end
 
-      def extract_youtube_url(text)
-        return nil if text.to_s.empty?
+          # Use enhanced execution with validation and retry
+          context = { urls: urls, task: task, interactive: false }
+          result = runner.run(cmd, context)
 
-        urls = text.scan(%r{https?://[^\s]+})
-        urls.find { |u| u.include?("youtube.com/") || u.include?("youtu.be/") }
-      end
+          if result[:success]
+            executed << {
+              ok: true,
+              exit_code: 0,
+              stdout: result[:stdout].to_s,
+              stderr: result[:stderr].to_s,
+              command: result[:command],
+              original_command: cmd,
+              adaptations: result[:adaptations]
+            }
+          else
+            executed << {
+              ok: false,
+              exit_code: -1,
+              stdout: "",
+              stderr: result[:error].to_s,
+              command: result[:command] || cmd,
+              original_command: cmd,
+              error_stage: result[:stage]
+            }
+          end
+        end
 
-      def fetch_youtube_metadata(url)
-        cmd = "yt-dlp --dump-json --skip-download --no-warnings #{Shellwords.escape(url)} 2>/dev/null"
-        output = `#{cmd}`
-        status = $?.exitstatus
-        return { error: "yt-dlp command failed with exit code #{status}" } unless status == 0
-        return { error: "yt-dlp returned empty output" } if output.to_s.strip.empty?
+        return nil if executed.empty?
 
-        data = JSON.parse(output)
-        {
-          title: data["title"].to_s.strip,
-          channel: (data["channel"] || data["uploader"] || "unknown").to_s.strip,
-          upload_date: (data["upload_date"] || "unknown").to_s.strip,
-          duration: data["duration"].to_i
-        }
-      rescue JSON::ParserError => e
-        { error: "invalid yt-dlp JSON: #{e.message}" }
+        summarize_evidence_execution(
+          skill_name: skill_name,
+          task: task,
+          extracted_commands: commands,
+          selected_commands: selected,
+          blocked_commands: blocked,
+          executed: executed,
+          llm_name: llm_name
+        )
       rescue => e
-        { error: e.message }
+        "❌ 证据执行流程失败: #{e.message}"
       end
 
-      def format_verified_skill_result(result:, verification:)
-        body = result.to_s
-        warning = detect_title_mismatch_warning(body, verification[:title])
-
-        lines = []
-        lines << "yt-dlp verified:"
-        lines << "- title: #{verification[:title]}"
-        lines << "- channel: #{verification[:channel]}"
-        lines << "- upload_date: #{verification[:upload_date]}"
-        lines << "- duration_seconds: #{verification[:duration]}"
-        lines << ""
-        lines << warning if warning
-        lines << body
-        lines.join("\n")
+      def extract_bash_commands(skill_md_content)
+        skill_md_content.scan(/```bash\s*\n(.*?)```/m).flatten.map(&:strip).reject(&:empty?)
       end
 
-      def detect_title_mismatch_warning(text, verified_title)
-        claimed = text[/视频标题\s*[:：]\s*(.+)/, 1] || text[/标题\s*[:：]\s*(.+)/, 1]
-        return nil unless claimed
+      def select_relevant_commands(commands, task:, urls:)
+        url_present = urls.any?
+        keywords = task.to_s.downcase.scan(/[a-z0-9_]+|[\u4e00-\u9fa5]+/)
 
-        normalized_claimed = normalize_compare_text(claimed)
-        normalized_verified = normalize_compare_text(verified_title)
-        return nil if normalized_claimed.empty? || normalized_verified.empty?
-        return nil if normalized_claimed.include?(normalized_verified) || normalized_verified.include?(normalized_claimed)
+        scored = commands.map do |cmd|
+          lower = cmd.downcase
+          score = 0
+          score += 4 if url_present && (lower.include?("video_url") || lower.include?("youtube") || lower.include?("youtu.be"))
+          score += 3 if lower.include?("dump-json") || lower.include?("--list-subs") || lower.include?("--write-auto-sub")
+          score += 2 if lower.include?("python3") || lower.include?("sed ")
+          score += keywords.count { |k| k.length > 1 && lower.include?(k) }
+          [cmd, score]
+        end
 
-        "⚠️ 检测到技能输出标题与 yt-dlp 取证不一致，以上述取证结果为准。"
+        scored.sort_by { |(_, s)| -s }.map(&:first)
       end
 
-      def normalize_compare_text(text)
-        text.to_s.downcase.gsub(/["'“”‘’\s]/, "").gsub(/[^[:alnum:]\p{Han}]/, "")
+      def command_allowed_for_evidence?(cmd)
+        blocked_patterns = [
+          /\brm\b/i,
+          /\bsudo\b/i,
+          /\bapt(-get)?\b/i,
+          /\byum\b/i,
+          /\bbrew\b/i,
+          /\bchoco\b/i,
+          /\bpip\s+install\b/i,
+          /\bnpm\s+install\b/i,
+          /\bgit\s+clone\b/i,
+          /\bcurl\b.*\|\s*(sh|bash)/i,
+          /\bwget\b.*\|\s*(sh|bash)/i
+        ]
+        blocked_patterns.none? { |p| cmd.match?(p) }
+      end
+
+      def prepare_command_for_task(cmd, urls:)
+        prepared = cmd.dup
+        if urls.any?
+          escaped_url = Shellwords.escape(urls.first)
+          prepared = prepared.gsub("VIDEO_URL", escaped_url)
+        end
+        prepared
+      end
+
+      def run_evidence_command(command, timeout_sec: 30)
+        stdout = ""
+        stderr = ""
+        status = nil
+
+        Timeout.timeout(timeout_sec) do
+          stdout, stderr, status = Open3.capture3("bash", "-lc", command)
+        end
+
+        {
+          ok: status&.success? || false,
+          exit_code: status&.exitstatus,
+          stdout: stdout.to_s,
+          stderr: stderr.to_s
+        }
+      rescue Timeout::Error
+        {
+          ok: false,
+          exit_code: nil,
+          stdout: "",
+          stderr: "Command timed out after #{timeout_sec}s"
+        }
+      end
+
+      def summarize_evidence_execution(skill_name:, task:, extracted_commands:, selected_commands:, blocked_commands:, executed:, llm_name:)
+        facts = extract_key_value_facts(executed)
+
+        verified = if facts.empty?
+                     "- No structured facts extracted from command output."
+                   else
+                     facts.map { |k, v| "- #{k}: #{v}" }.join("\n")
+                   end
+
+        unknown = if facts.empty?
+                    "- Unable to verify key facts from command output."
+                  else
+                    "- Any fact not listed above remains Unverified."
+                  end
+
+        extracted = extracted_commands.map.with_index(1) do |cmd, idx|
+          "#{idx}. #{cmd}"
+        end.join("\n")
+
+        selected = selected_commands.map.with_index(1) do |cmd, idx|
+          "#{idx}. #{cmd}"
+        end.join("\n")
+
+        blocked = if blocked_commands.empty?
+                    "(none)"
+                  else
+                    blocked_commands.map.with_index(1) do |item, idx|
+                      "#{idx}. #{item[:command]}\n   reason: #{item[:reason]}"
+                    end.join("\n")
+                  end
+
+        steps = executed.map.with_index(1) do |e, idx|
+          <<~STEP
+            #{idx}. original_command: #{e[:original_command]}
+               prepared_command: #{e[:command]}
+               exit_code: #{e[:exit_code]} (ok=#{e[:ok]})
+               stdout:
+            #{indent_multiline(e[:stdout].to_s, 6)}
+               stderr:
+            #{indent_multiline(e[:stderr].to_s, 6)}
+          STEP
+        end.join("\n")
+
+        <<~TEXT.strip
+          Skill: #{skill_name}
+          Task: #{task}
+
+          Extracted Commands From SKILL.md
+          #{extracted.empty? ? "(none)" : extracted}
+
+          Selected Commands
+          #{selected.empty? ? "(none)" : selected}
+
+          Blocked Commands
+          #{blocked}
+
+          Verified Facts
+          #{verified}
+
+          Unverified / Unknown
+          #{unknown}
+
+          What I Actually Executed
+          #{steps}
+        TEXT
+      end
+
+      def indent_multiline(text, spaces)
+        pad = " " * spaces
+        body = text.to_s
+        return "#{pad}(empty)" if body.strip.empty?
+
+        body.lines.map { |line| "#{pad}#{line}" }.join
+      end
+
+      def extract_key_value_facts(executed)
+        pairs = []
+        executed.each do |e|
+          [e[:stdout], e[:stderr]].each do |text|
+            text.to_s.each_line do |line|
+              m = line.match(/^\s*([A-Za-z][A-Za-z0-9 _\-\/]{1,50})\s*:\s*(.+?)\s*$/)
+              next unless m
+
+              key = m[1].strip
+              value = m[2].strip
+              next if key.empty? || value.empty?
+              next if value.length > 300
+              pairs << [key, value]
+            end
+          end
+        end
+
+        uniq = {}
+        pairs.each do |k, v|
+          uniq[k] ||= v
+        end
+        uniq.to_a.first(20)
+      end
+
+      def build_grounding_guarded_task(task)
+        <<~TASK.strip
+          #{task}
+
+          Grounding requirements (must follow):
+          1. Do not claim facts as verified unless they come from concrete tool output.
+          2. Separate output into:
+             - Verified Facts (with concrete evidence/source)
+             - Unverified / Unknown
+             - What I Actually Executed
+          3. If evidence is missing, explicitly say "Unknown" rather than guessing.
+        TASK
+      end
+
+      def build_grounding_retry_task(original_task:, previous_output:)
+        <<~TASK.strip
+          #{original_task}
+
+          Your previous answer did not provide sufficient grounding and may contain unverified claims.
+
+          Previous answer:
+          #{previous_output}
+
+          Rewrite the answer with strict grounding:
+          - Only keep claims backed by concrete tool outputs.
+          - Mark everything else as Unverified / Unknown.
+          - Include a short "What I Actually Executed" section.
+          - Do not invent titles, numbers, names, dates, or events.
+        TASK
+      end
+
+      def grounding_structure_missing?(text)
+        normalized = text.to_s
+        has_verified = normalized.match?(/verified facts|已验证事实|可验证事实/i)
+        has_unknown = normalized.match?(/unverified|unknown|未验证|未知|不确定/i)
+        has_executed = normalized.match?(/what i actually executed|实际执行|执行步骤|commands/i)
+        !(has_verified && has_unknown && has_executed)
+      end
+
+      def grounding_risky_claims?(text)
+        normalized = text.to_s
+        risky_patterns = [
+          /我已(?:获取|确认|验证)/,
+          /根据我(?:获取|提取|分析)到/,
+          /\bI (?:fetched|verified|confirmed|extracted)\b/i,
+          /视频标题\s*[:：]/,
+          /metadata|元数据/i
+        ]
+        risky_patterns.any? { |pattern| normalized.match?(pattern) }
+      end
+
+      # run_skill 会为防幻觉在任务末尾附加 grounding 约束。
+      # 对脚本工具来说这会污染命令参数，需要在执行前去掉该后缀。
+      def strip_grounding_suffix(task_text)
+        text = task_text.to_s
+        marker = /\n\nGrounding requirements \(must follow\):\n/i
+        parts = text.split(marker, 2)
+        parts.first.to_s.strip
+      end
+
+      # 纯文本改写类技能（如 humanizer/rewrite/translate）可在闭环输入下跳过证据命令阶段
+      def allow_text_only_agent_without_evidence?(skill:, message:, urls:)
+        return false if urls.any?
+
+        task = message.to_s
+        return false if task.strip.empty?
+
+        skill_text = [
+          skill.name.to_s,
+          skill.respond_to?(:description) ? skill.description.to_s : "",
+          (skill.config[:description].to_s rescue "")
+        ].join(" ").downcase
+        text = task.downcase
+
+        transform_patterns = [
+          /humaniz|rewrite|paraphrase|polish|edit|proofread|translate|rephrase/,
+          /润色|改写|人性化|去ai|优化文案|校对|翻译|重写/
+        ]
+        external_patterns = [
+          /search|fetch|crawl|scrape|download|youtube|weather|news|stock|price|metadata|transcript|api/,
+          /搜索|抓取|下载|视频|天气|新闻|股价|价格|元数据|转录|接口/
+        ]
+
+        has_transform_intent = transform_patterns.any? { |p| text.match?(p) || skill_text.match?(p) }
+        needs_external_data = external_patterns.any? { |p| text.match?(p) || skill_text.match?(p) }
+
+        payload = task.gsub(%r{https?://[^\s]+}, "").strip
+        has_substantial_input = payload.length >= 40 || payload.match?(/[，。！？,.!?].+[，。！？,.!?]/m)
+
+        has_transform_intent && !needs_external_data && has_substantial_input
       end
 
       # 尝试使用 MCP 搜索
@@ -895,18 +1172,26 @@ module SmartBot
       # 加载并激活所有 skills
       def load_and_activate_skills
         skills_dir = File.expand_path("~/smart_ai/smart_bot/skills")
-        
-        # 加载所有 skill 文件（原生 Ruby + Markdown Skills）
+
         SmartBot::Skill.load_all(skills_dir)
-        
-        # 激活所有已注册的 skills
         SmartBot::Skill.activate_all!
-        
-        # 简明显示加载数量
-        loaded_count = SmartBot::Skill.list.length
-        say "   Skills loaded: #{loaded_count}", :green if loaded_count > 0
       rescue => e
-        say "⚠️  Failed to load skills: #{e.message}", :yellow
+        # Legacy skill loading failed, continue with new system
+      end
+
+      def load_new_skill_system
+        require_relative "../skill_system"
+
+        stats = SmartBot::SkillSystem.load_all
+        say "   Skill System: #{stats[:available]} skills available", :green if stats[:available] > 0
+
+        router = SmartBot::SkillSystem.router
+        if router.semantic_index
+          semantic_stats = router.semantic_stats
+          say "   Semantic index: #{semantic_stats[:unique_terms]} terms", :blue
+        end
+      rescue => e
+        say "⚠️  Skill system not available: #{e.message}", :yellow
       end
 
       # 加载 SmartBot 自定义工具
@@ -927,7 +1212,62 @@ module SmartBot
         say "⚠️  MCP 客户端加载失败: #{e.message}", :yellow if @agent_engine
       end
 
-      # 调用 MCP 工具
+      def try_skill_system_route(message, llm_name)
+        return nil unless defined?(SmartBot::SkillSystem)
+        return nil if SmartBot::SkillSystem.registry.empty?
+
+        begin
+          plan = SmartBot::SkillSystem.route(message)
+          say "🎯 Skill System routing: plan.empty=#{plan.empty?}", :cyan
+          return nil if plan.empty?
+
+          primary_skill = plan.primary_skill
+          say "🎯 Primary skill: #{primary_skill&.name || 'nil'}", :cyan
+          return nil unless primary_skill
+
+          say "🎯 Skill System matched: #{primary_skill.name}", :cyan
+
+          result = SmartBot::SkillSystem.execute(plan, context: { llm: llm_name })
+
+          if result.success?
+            # Format the output nicely
+            value = result.value
+            if value.is_a?(Hash) && value[:success] && value[:output]
+              format_skill_output(value[:output], primary_skill.name)
+            elsif value.is_a?(Hash)
+              value[:output] || value.to_s
+            else
+              value.to_s
+            end
+          else
+            say "⚠️ Skill execution failed: #{result.error}", :yellow
+            nil
+          end
+        rescue => e
+          say "⚠️ Skill System routing error: #{e.message}", :yellow
+          SmartBot.logger&.debug "Skill System routing failed: #{e.message}"
+          nil
+        end
+      end
+
+      def format_skill_output(output, skill_name)
+        # Clean up the output for better display
+        lines = output.to_s.split("\n")
+        
+        # Remove progress bar lines (lines with \r)
+        lines = lines.reject { |line| line.include?("\r") }
+        
+        # Remove empty lines at the beginning and end
+        lines = lines.drop_while(&:empty?)
+        lines = lines.reverse.drop_while(&:empty?).reverse
+        
+        # Format the output
+        formatted = lines.join("\n")
+        
+        # Add a header
+        "📥 Download started by #{skill_name}\n\n#{formatted}"
+      end
+
       def call_mcp_tool(server_name, tool_name, params)
         # 获取已定义的服务器
         servers = SmartAgent::MCPClient.servers
@@ -1182,7 +1522,7 @@ module SmartBot
       end
       
       # 根据 skill 名称直接调用
-      def call_skill_by_name(skill_name, message, urls, llm_name)
+      def call_skill_by_name(skill_name, message, urls, llm_name, require_evidence: false)
         # 支持 Symbol 和 String 两种 key
         skill = SmartBot::Skill.find(skill_name.to_sym) || SmartBot::Skill.find(skill_name)
         unless skill
@@ -1222,9 +1562,10 @@ module SmartBot
             return nil
           end
 
-          # 构建脚本参数
-          url = urls.first || ""
-          args = url
+          # 构建脚本参数：优先使用任务文本（如 "init" / "search xxx"），
+          # 并去掉 run_skill 注入的 grounding 后缀；为空时回退到首个 URL。
+          script_task = strip_grounding_suffix(message)
+          args = script_task.empty? ? (urls.first || "") : script_task
           
           say "📜 执行脚本: #{tool_name}", :cyan
           
@@ -1265,12 +1606,49 @@ module SmartBot
           tool_name = target_tool[:name].to_s
           
           if tool_name.end_with?('_agent')
-            # 调用 agent 工具
-            context = urls.any? ? "包含的URL: #{urls.join(', ')}" : ""
-            result = tool.call({ 
-              "task" => message,
-              "context" => context
-            })
+            # 首先执行 SKILL.md 中的命令获取实际数据
+            evidence_result = execute_skill_via_markdown(
+              skill_name: skill_name,
+              skill: skill,
+              task: message,
+              urls: urls,
+              llm_name: llm_name
+            )
+
+            if evidence_result
+              # 将执行结果作为上下文传递给 agent
+              context = urls.any? ? "包含的URL: #{urls.join(', ')}\n\n" : ""
+              context += "命令执行结果:\n#{evidence_result}"
+              
+              say "📊 已将执行结果传递给 skill agent 进行分析", :cyan
+              
+              result = tool.call({ 
+                "task" => message,
+                "context" => context
+              })
+            elsif require_evidence
+              if allow_text_only_agent_without_evidence?(skill: skill, message: message, urls: urls)
+                context = +""
+                context << (urls.any? ? "包含的URL: #{urls.join(', ')}\n\n" : "")
+                context << "任务类型: 文本改写/润色（闭环输入），无外部证据命令。\n"
+                context << "约束: 仅基于用户提供文本改写，不得添加外部事实。"
+
+                say "📝 该技能为闭环文本任务，跳过证据命令阶段", :cyan
+                result = tool.call({
+                  "task" => message,
+                  "context" => context
+                })
+              else
+                return "❌ 该技能仅提供说明型 `_agent`，且无法从 SKILL.md 生成可执行证据流程；为避免幻觉，run_skill 已拒绝本次调用。"
+              end
+            else
+              # 调用 agent 工具（无证据模式）
+              context = urls.any? ? "包含的URL: #{urls.join(', ')}" : ""
+              result = tool.call({ 
+                "task" => message,
+                "context" => context
+              })
+            end
           else
             # 调用普通工具（如 smart_search）
             # 提取搜索关键词或任务

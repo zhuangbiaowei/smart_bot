@@ -1,6 +1,20 @@
 ---
 name: invoice-organizer
 description: Automatically organizes invoices and receipts for tax preparation by reading messy files, extracting key information, renaming them consistently, and sorting them into logical folders. Turns hours of manual bookkeeping into minutes of automated organization.
+triggers:
+  - invoice
+  - receipt
+  - 发票
+  - 收据
+  - 报销
+  - organize
+  - 整理
+  - 发票整理
+  - 收据整理
+  - tax
+  - 税务
+  - bookkeeping
+  - 记账
 ---
 
 # Invoice Organizer

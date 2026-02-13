@@ -19,7 +19,7 @@ GEM
     csv (3.3.5)
     diff-lcs (1.6.2)
     event_stream_parser (1.0.0)
-    faraday (2.14.0)
+    faraday (2.14.1)
       faraday-net_http (>= 2.0, < 3.5)
       json
       logger
@@ -56,6 +56,7 @@ GEM
     nokogiri (1.19.0-x86_64-linux-gnu)
       racc (~> 1.4)
     numo-narray (0.9.2.1)
+    ostruct (0.6.3)
     puma (6.6.1)
       nio4r (~> 2.0)
     racc (1.8.1)
@@ -105,7 +106,7 @@ GEM
       rack-protection (= 4.2.1)
       rack-session (>= 2.0.0, < 3)
       tilt (~> 2.0)
-    smart_agent (0.2.2)
+    smart_agent (0.2.3)
       mcp-sdk.rb
       smart_prompt
     smart_prompt (0.3.4)
@@ -142,6 +143,7 @@ DEPENDENCIES
   httparty
   mime-types (~> 3.0)
   nokogiri (~> 1.18)
+  ostruct (~> 0.6)
   puma (~> 6.6)
   rake (~> 13.0)
   rspec (~> 3.0)
@@ -159,7 +161,7 @@ CHECKSUMS
   csv (3.3.5) sha256=6e5134ac3383ef728b7f02725d9872934f523cb40b961479f69cf3afa6c8e73f
   diff-lcs (1.6.2) sha256=9ae0d2cba7d4df3075fe8cd8602a8604993efc0dfa934cff568969efb1909962
   event_stream_parser (1.0.0) sha256=a2683bab70126286f8184dc88f7968ffc4028f813161fb073ec90d171f7de3c8
-  faraday (2.14.0) sha256=8699cfe5d97e55268f2596f9a9d5a43736808a943714e3d9a53e6110593941cd
+  faraday (2.14.1) sha256=a43cceedc1e39d188f4d2cdd360a8aaa6a11da0c407052e426ba8d3fb42ef61c
   faraday-multipart (1.2.0) sha256=7d89a949693714176f612323ca13746a2ded204031a6ba528adee788694ef757
   faraday-net_http (3.4.2) sha256=f147758260d3526939bf57ecf911682f94926a3666502e24c69992765875906c
   httparty (0.24.2) sha256=8fca6a54aa0c4aa4303a0fd33e5e2156175d6a5334f714263b458abd7fda9c38
@@ -178,6 +180,7 @@ CHECKSUMS
   nokogiri (1.19.0) sha256=e304d21865f62518e04f2bf59f93bd3a97ca7b07e7f03952946d8e1c05f45695
   nokogiri (1.19.0-x86_64-linux-gnu) sha256=f482b95c713d60031d48c44ce14562f8d2ce31e3a9e8dd0ccb131e9e5a68b58c
   numo-narray (0.9.2.1) sha256=eed76b47eebe1288ffd878b387f1882f4863d8e6ab5dd61453768139e14adceb
+  ostruct (0.6.3) sha256=95a2ed4a4bd1d190784e666b47b2d3f078e4a9efda2fccf18f84ddc6538ed912
   puma (6.6.1) sha256=b9b56e4a4ea75d1bfa6d9e1972ee2c9f43d0883f011826d914e8e37b3694ea1e
   racc (1.8.1) sha256=4a7f6929691dbec8b5209a0b373bc2614882b55fc5d2e447a21aaa691303d62f
   rack (3.2.4) sha256=5d74b6f75082a643f43c1e76b419c40f0e5527fcfee1e669ac1e6b73c0ccb6f6
@@ -197,7 +200,7 @@ CHECKSUMS
   ruby_rich (0.4.0) sha256=95022ea5ee4c20aaff9bf3182313e29dabffcd4e1c401fc734f6099aa68e7618
   safe_ruby (1.0.5) sha256=ec43cd08da87b754c5ae741883f45d44e5d867deca9c46e01a70b6ff20c0bb20
   sinatra (4.2.1) sha256=b7aeb9b11d046b552972ade834f1f9be98b185fa8444480688e3627625377080
-  smart_agent (0.2.2) sha256=cf1350420b0470373ae30739f03fbe787d2ec38c0194790f4c630d033af651c0
+  smart_agent (0.2.3) sha256=28e1ee9c723cdf71b44bf54f062d654fe7afd9958ab7ab98e21814436856eccc
   smart_bot (0.1.0)
   smart_prompt (0.3.4) sha256=2f20410f109bb165d16d1706b436cd44d7cde8fd3bca1a02b18ae9fcbb5ad0b5
   sqlite3 (1.7.3) sha256=fa77f63c709548f46d4e9b6bb45cda52aa3881aa12cc85991132758e8968701c
@@ -213,4 +216,4 @@ CHECKSUMS
   yaml (0.4.0) sha256=240e69d1e6ce3584d6085978719a0faa6218ae426e034d8f9b02fb54d3471942
 
 BUNDLED WITH
-  4.0.3
+  4.0.6

@@ -17,12 +17,16 @@ module SmartBot
 
         super(
           name: :run_skill,
-          description: "Delegate a subtask to a specific skill. Use this when another skill is better suited for the subtask.",
+          description: "CRITICAL: Use this tool to delegate tasks to specialized skills. " \
+                       "When a user's request matches any skill description in the system prompt, " \
+                       "you MUST call this tool instead of handling the task yourself. " \
+                       "Examples: YouTube videos -> youtube-summarizer, weather queries -> weather, " \
+                       "invoice organization -> invoice-organizer. Pass the user's complete request as the 'task' parameter.",
           parameters: {
             type: "object",
             properties: {
-              skill_name: { type: "string", description: "Target skill name (directory name in skills/)" },
-              task: { type: "string", description: "Task for the delegated skill" },
+              skill_name: { type: "string", description: "Target skill name from the available skills list (e.g., 'youtube-summarizer', 'weather', 'invoice-organizer')" },
+              task: { type: "string", description: "The complete user request to pass to the skill. Include all context, URLs, and requirements from the user's message." },
               parent_skill: { type: "string", description: "Optional current skill name for cycle prevention" },
               chain: {
                 type: "string",

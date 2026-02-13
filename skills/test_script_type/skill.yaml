@@ -1,0 +1,25 @@
+name: test_script_type
+description: 脚本类型执行测试skill。验证script类型skill的执行能力。
+version: "1.0.0"
+type: script
+
+triggers:
+  - test_script
+  - 脚本测试
+  - script test
+
+entrypoints:
+  default:
+    command: scripts/echo.py
+    description: Echo test script
+
+permissions:
+  filesystem:
+    read: []
+    write: []
+  network:
+    outbound: false
+
+execution_policy:
+  sandbox: process
+  timeout: 30

@@ -20,6 +20,7 @@ gem "httparty"
 # For Ruby 3.4+ compatibility
 gem "base64", "~> 0.2"
 gem "mime-types", "~> 3.0"
+gem "ostruct", "~> 0.6"
 
 gemspec
 

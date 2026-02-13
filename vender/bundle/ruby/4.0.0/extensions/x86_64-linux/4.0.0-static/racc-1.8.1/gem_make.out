@@ -1,0 +1,18 @@
+current directory: /home/mlf/smart_ai/smart_bot/vender/bundle/ruby/4.0.0/gems/racc-1.8.1/ext/racc/cparse
+/usr/local/bin/ruby extconf.rb
+creating Makefile
+
+current directory: /home/mlf/smart_ai/smart_bot/vender/bundle/ruby/4.0.0/gems/racc-1.8.1/ext/racc/cparse
+make -j37 DESTDIR\= sitearchdir\=./.gem.20260210-5377-l9tt40 sitelibdir\=./.gem.20260210-5377-l9tt40 clean
+
+current directory: /home/mlf/smart_ai/smart_bot/vender/bundle/ruby/4.0.0/gems/racc-1.8.1/ext/racc/cparse
+make -j37 DESTDIR\= sitearchdir\=./.gem.20260210-5377-l9tt40 sitelibdir\=./.gem.20260210-5377-l9tt40
+compiling cparse.c
+linking shared-object racc/cparse.so
+
+current directory: /home/mlf/smart_ai/smart_bot/vender/bundle/ruby/4.0.0/gems/racc-1.8.1/ext/racc/cparse
+make -j37 DESTDIR\= sitearchdir\=./.gem.20260210-5377-l9tt40 sitelibdir\=./.gem.20260210-5377-l9tt40 install
+/usr/bin/install -c -m 0755 cparse.so ./.gem.20260210-5377-l9tt40/racc
+
+current directory: /home/mlf/smart_ai/smart_bot/vender/bundle/ruby/4.0.0/gems/racc-1.8.1/ext/racc/cparse
+make DESTDIR\= sitearchdir\=./.gem.20260210-5377-l9tt40 sitelibdir\=./.gem.20260210-5377-l9tt40 clean

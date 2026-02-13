@@ -1,0 +1,76 @@
+# The behavior of RuboCop can be controlled via the .rubocop.yml
+# configuration file. It makes it possible to enable/disable
+# certain cops (checks) and to alter their behavior if they accept
+# any parameters. The file can be placed either in your home
+# directory or in some project directory.
+#
+# RuboCop will start looking for the configuration file in the directory
+# where the inspected file is and continue its way up to the root directory.
+#
+# See https://github.com/rubocop-hq/rubocop/blob/master/manual/configuration.md
+
+require:
+  - rubocop-performance
+  - rubocop-rspec
+  - rubocop-rake
+
+AllCops:
+  TargetRubyVersion: 2.7
+  EnabledByDefault: true
+  DisplayCopNames: true
+
+Style/Copyright:
+  Enabled: true
+  AutocorrectNotice: '# Copyright (c) 2018 Uku Taht'
+
+Lint/ConstantResolution: # Not available ins rubocop 0.81
+  Enabled: false
+
+Style/DocumentationMethod:
+  Enabled: false
+
+Style/StringHashKeys :
+  Enabled: true
+  Exclude:
+    - '*.gemspec'
+
+Style/MissingElse:
+  EnforcedStyle: case
+
+Metrics/ModuleLength :
+  Exclude:
+    - 'spec/**/*'
+
+Metrics/BlockLength :
+  Exclude:
+    - 'spec/**/*'
+    - '*.gemspec'
+
+Security/Eval :
+  Exclude:
+    - 'Rakefile'
+
+# rubocop-rspec options
+RSpec/MessageExpectation :
+  Enabled: true
+
+RSpec/SpecFilePathFormat :
+  Enabled: true
+
+RSpec/SpecFilePathSuffix :
+  Enabled: true
+
+RSpec/NestedGroups:
+  Max: 4
+
+Layout/RedundantLineBreak:
+  Enabled: false
+  
+Style/DisableCopsWithinSourceCodeDirective:
+  Enabled: true
+  AllowedCops: ['Style/OptionHash', 'Security/Eval', 'Security/MarshalLoad',
+  'Metrics/AbcSize', 'Metrics/MethodLength']
+
+Layout/EndOfLine:
+  EnforcedStyle: lf
+  

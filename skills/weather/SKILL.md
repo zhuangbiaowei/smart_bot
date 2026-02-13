@@ -1,3 +1,17 @@
+---
+name: weather
+description: 获取天气信息和预报。支持查询当前天气和未来天气预报。
+triggers:
+  - weather
+  - 天气
+  - 气温
+  - 温度
+  - forecast
+  - 预报
+  - 下雨
+  - 晴天
+---
+
 # Weather Skill
 
 获取天气信息和预报。

@@ -1,0 +1,14 @@
+#!/usr/bin/env ruby
+
+require 'better_prompt'
+
+if ARGV[0]
+  db_path = ARGV[0]
+else
+  db_path = "./db/prompt.db"
+end
+db_path = File.expand_path(db_path)
+BetterPrompt.setup(db_path: db_path)
+
+BetterPrompt::CLI.start(db_path)
+
