@@ -2,6 +2,7 @@
 *.rbc
 /.config
 /.bundle
+/vender/bundle
 /coverage/
 /InstalledFiles
 /pkg/

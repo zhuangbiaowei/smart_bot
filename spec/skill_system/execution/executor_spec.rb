@@ -69,6 +69,52 @@ RSpec.describe SmartBot::SkillSystem::Sandbox do
       expect(sandbox.check_permissions(perms2)).to be false
     end
   end
+
+  describe "ruby skill invocation" do
+    let(:metadata) do
+      SmartBot::SkillSystem::SkillMetadata.new(
+        name: "weather",
+        description: "weather skill",
+        triggers: ["weather", "天气"]
+      )
+    end
+
+    let(:skill) do
+      SmartBot::SkillSystem::SkillPackage.new(
+        name: "weather",
+        source_path: "/tmp/weather",
+        metadata: metadata,
+        type: :ruby_native
+      )
+    end
+
+    it "uses registered tool instance instead of SmartAgent::Tool.call class method" do
+      definition = instance_double("SkillDefinition", tools: [{ name: :get_weather }])
+      allow(SmartBot::Skill).to receive(:find).with(:weather).and_return(definition)
+
+      tool_context = instance_double("ToolContext", params: { location: {}, unit: {} })
+      tool = instance_double("Tool", context: tool_context)
+      allow(tool).to receive(:call).with(hash_including("location")).and_return({ location: "Shanghai", temperature: "20C" })
+
+      allow(SmartAgent::Tool).to receive(:find_tool).with(:weather_agent).and_return(nil)
+      allow(SmartAgent::Tool).to receive(:find_tool).with("weather_agent").and_return(nil)
+      allow(SmartAgent::Tool).to receive(:find_tool).with(:get_weather).and_return(tool)
+
+      result = sandbox.send(:invoke_ruby_skill, skill, { "task" => "Today shanghai weather?" })
+      expect(result.success?).to be true
+      expect(result.value).to include(:location)
+    end
+
+    it "returns clear failure when no skill tool is available" do
+      definition = instance_double("SkillDefinition", tools: [])
+      allow(SmartBot::Skill).to receive(:find).with(:weather).and_return(definition)
+      allow(SmartAgent::Tool).to receive(:find_tool).and_return(nil)
+
+      result = sandbox.send(:invoke_ruby_skill, skill, { "task" => "weather shanghai" })
+      expect(result.failure?).to be true
+      expect(result.error).to include("No executable tool found")
+    end
+  end
 end
 
 RSpec.describe SmartBot::SkillSystem::SkillExecutor do

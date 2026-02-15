@@ -5,6 +5,7 @@ require "open-uri"
 require "json"
 require "yaml"
 require "ostruct"
+require "pathname"
 
 module SmartBot
   module SkillSystem
@@ -52,13 +53,6 @@ module SmartBot
       def install_from_git(url, name: nil, version: nil, force: false)
         validate_git_url(url)
 
-        skill_name = name || extract_name_from_git_url(url)
-        target_path = File.join(@target_dir, skill_name)
-
-        if File.exist?(target_path) && !force
-          return install_result(false, "Skill '#{skill_name}' already exists. Use --force to overwrite.")
-        end
-
         @observer.step_started("Cloning from #{url}")
 
         Dir.mktmpdir do |tmpdir|
@@ -69,16 +63,9 @@ module SmartBot
             return install_result(false, "Failed to clone repository")
           end
 
-          validate_skill_structure(tmpdir)
-
-          if File.exist?(target_path)
-            FileUtils.rm_rf(target_path)
-          end
-
-          FileUtils.cp_r(tmpdir, target_path)
+          inferred_name = name || extract_name_from_git_url(url)
+          return install_from_directory_root(tmpdir, name: inferred_name, force: force)
         end
-
-        install_result(true, "Successfully installed '#{skill_name}'", skill_name: skill_name, path: target_path)
       end
 
       # Install from GitHub (shorthand)
@@ -88,22 +75,12 @@ module SmartBot
       end
 
       # Install from local directory
-      def install_from_local(path, name: nil, **_options)
+      def install_from_local(path, name: nil, force: false, **_options)
         unless File.directory?(path)
           return install_result(false, "Not a directory: #{path}")
         end
 
-        validate_skill_structure(path)
-
-        skill_name = name || File.basename(path)
-        target_path = File.join(@target_dir, skill_name)
-
-        if File.exist?(target_path)
-          return install_result(false, "Skill '#{skill_name}' already exists")
-        end
-
-        FileUtils.cp_r(path, target_path)
-        install_result(true, "Successfully installed '#{skill_name}'", skill_name: skill_name, path: target_path)
+        install_from_directory_root(path, name: name, force: force)
       end
 
       # Install from NPM package
@@ -237,14 +214,15 @@ module SmartBot
 
       # Remove installed skill
       def uninstall(skill_name)
-        target_path = File.join(@target_dir, skill_name)
+        target_path = resolve_installed_skill_path(skill_name)
 
-        unless File.exist?(target_path)
+        unless target_path && File.exist?(target_path)
           return install_result(false, "Skill '#{skill_name}' not found")
         end
 
+        removed_name = File.basename(target_path)
         FileUtils.rm_rf(target_path)
-        install_result(true, "Successfully uninstalled '#{skill_name}'")
+        install_result(true, "Successfully uninstalled '#{removed_name}'")
       end
 
       # Update installed skill
@@ -397,6 +375,148 @@ module SmartBot
           message: message,
           **data
         )
+      end
+
+      def install_from_directory_root(root_path, name: nil, force: false)
+        root_path = File.expand_path(root_path)
+        skill_dirs = discover_skill_dirs(root_path)
+
+        if skill_dirs.empty?
+          return install_result(false, "No valid skills found under: #{root_path}")
+        end
+
+        if skill_dirs.size == 1 && skill_dirs.first == root_path
+          return install_single_skill_dir(root_path, skill_name: (name || File.basename(root_path)), force: force)
+        end
+
+        if name
+          return install_result(false, "--name can only be used when installing a single skill")
+        end
+
+        install_multiple_skill_dirs(root_path, skill_dirs, force: force)
+      end
+
+      def install_single_skill_dir(path, skill_name:, force:)
+        validate_skill_structure(path)
+        target_path = File.join(@target_dir, skill_name)
+
+        if File.exist?(target_path)
+          return install_result(false, "Skill '#{skill_name}' already exists. Use --force to overwrite.") unless force
+          FileUtils.rm_rf(target_path)
+        end
+
+        FileUtils.cp_r(path, target_path)
+        install_result(true, "Successfully installed '#{skill_name}'", skill_name: skill_name, path: target_path)
+      end
+
+      def install_multiple_skill_dirs(root_path, skill_dirs, force:)
+        names = generate_unique_skill_names(root_path, skill_dirs)
+        installed = []
+        skipped = []
+
+        skill_dirs.each do |dir|
+          skill_name = names.fetch(dir)
+          target_path = File.join(@target_dir, skill_name)
+
+          if File.exist?(target_path)
+            unless force
+              skipped << "#{skill_name} (already exists)"
+              next
+            end
+            FileUtils.rm_rf(target_path)
+          end
+
+          FileUtils.cp_r(dir, target_path)
+          installed << { name: skill_name, path: target_path, source: dir }
+        end
+
+        return install_result(false, "No skills installed. #{skipped.join(', ')}") if installed.empty?
+
+        message = "Successfully installed #{installed.size} skill(s)"
+        message += "; skipped #{skipped.size} (use --force to overwrite)" if skipped.any?
+        install_result(true, message, installed: installed, skipped: skipped)
+      end
+
+      def discover_skill_dirs(root_path)
+        markers = %w[SKILL.md skill.yaml skill.rb]
+        dirs = markers.flat_map do |marker|
+          Dir.glob(File.join(root_path, "**", marker)).map { |f| File.dirname(f) }
+        end
+
+        dirs.uniq.sort
+      end
+
+      def generate_unique_skill_names(root_path, skill_dirs)
+        basename_counts = Hash.new(0)
+        skill_dirs.each { |dir| basename_counts[File.basename(dir)] += 1 }
+
+        skill_dirs.each_with_object({}) do |dir, names|
+          base = File.basename(dir)
+          if basename_counts[base] == 1
+            names[dir] = base
+            next
+          end
+
+          rel = Pathname.new(dir).relative_path_from(Pathname.new(root_path)).to_s
+          names[dir] = rel.tr(File::SEPARATOR, "_")
+        end
+      end
+
+      def resolve_installed_skill_path(skill_name)
+        exact_path = File.join(@target_dir, skill_name)
+        return exact_path if File.directory?(exact_path)
+
+        normalized_target = normalize_identifier(skill_name)
+        return nil if normalized_target.empty?
+
+        installed_dirs = Dir.glob(File.join(@target_dir, "*/")).select { |path| File.directory?(path) }
+
+        installed_dirs.find do |path|
+          matches_identifier?(File.basename(path), normalized_target) ||
+            installed_skill_identifiers(path).any? { |identifier| matches_identifier?(identifier, normalized_target) }
+        end
+      end
+
+      def installed_skill_identifiers(path)
+        identifiers = []
+        skill_yaml = File.join(path, "skill.yaml")
+        skill_md = File.join(path, "SKILL.md")
+
+        if File.exist?(skill_yaml)
+          begin
+            yaml = YAML.load_file(skill_yaml)
+            if yaml.is_a?(Hash)
+              metadata_name = yaml.dig("metadata", "name")
+              identifiers << metadata_name if metadata_name
+            end
+          rescue Psych::SyntaxError
+            # Ignore malformed metadata file; fallback to other identifiers.
+          end
+        end
+
+        if File.exist?(skill_md)
+          begin
+            content = File.read(skill_md, encoding: "UTF-8")
+            if content =~ /\A---\s*\n(.+?)\n---/m
+              frontmatter = YAML.safe_load($1, permitted_classes: [Date, Time], aliases: true)
+              if frontmatter.is_a?(Hash) && frontmatter["name"]
+                identifiers << frontmatter["name"]
+              end
+            end
+          rescue Psych::SyntaxError
+            # Ignore malformed frontmatter; uninstall can still match by path.
+          end
+        end
+
+        identifiers
+      end
+
+      def matches_identifier?(candidate, normalized_target)
+        normalize_identifier(candidate) == normalized_target
+      end
+
+      def normalize_identifier(value)
+        value.to_s.downcase.gsub(/[^a-z0-9]+/, "_").gsub(/^_+|_+$/, "").gsub(/_+/, "_")
       end
     end
 

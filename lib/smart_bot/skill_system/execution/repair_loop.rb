@@ -12,11 +12,12 @@ module SmartBot
       MAX_PATCHED_FILES = 3
       MAX_PATCH_HUNKS = 8
 
-      attr_reader :executor, :observer, :budget
+      attr_reader :executor, :observer, :budget, :repair_confirmation_callback
 
-      def initialize(executor:, observer: nil)
+      def initialize(executor:, observer: nil, repair_confirmation_callback: nil)
         @executor = executor
         @observer = observer
+        @repair_confirmation_callback = repair_confirmation_callback
         @budget = RepairBudget.new(
           max_attempts: MAX_REPAIR_ATTEMPTS,
           max_patched_files: MAX_PATCHED_FILES,
@@ -92,6 +93,14 @@ module SmartBot
             break
           end
 
+          decision = confirm_repair(skill, attempt, diagnosis, repair_plan)
+          unless decision[:approved]
+            @observer&.repair_failed(skill, attempt, "Repair rejected by user")
+            break
+          end
+
+          apply_user_suggestion(repair_plan, decision[:suggestion])
+
           patches_applied = apply_patches(skill, repair_plan)
 
           unless patches_applied.any?
@@ -128,6 +137,47 @@ module SmartBot
         end
 
         current_result
+      end
+
+      def confirm_repair(skill, attempt, diagnosis, repair_plan)
+        return { approved: true, suggestion: nil } unless @repair_confirmation_callback
+
+        result = @repair_confirmation_callback.call(
+          skill: skill,
+          attempt: attempt,
+          diagnosis: diagnosis.to_h,
+          repair_plan: repair_plan.to_h
+        )
+
+        case result
+        when false
+          { approved: false, suggestion: nil }
+        when Hash
+          { approved: !!result[:approved], suggestion: result[:suggestion] }
+        when String
+          { approved: true, suggestion: result }
+        else
+          { approved: true, suggestion: nil }
+        end
+      rescue => e
+        @observer&.repair_failed(skill, attempt, "Repair confirmation failed: #{e.message}")
+        { approved: false, suggestion: nil }
+      end
+
+      def apply_user_suggestion(repair_plan, suggestion)
+        suggestion_text = suggestion.to_s.strip
+        return if suggestion_text.empty?
+
+        repair_plan.add_patch(
+          file: "SKILL.md",
+          description: "Apply user-provided repair guidance",
+          action: :append_section,
+          content: <<~SECTION
+            ## User Repair Guidance
+
+            #{suggestion_text}
+          SECTION
+        )
       end
 
       def diagnose_failure(skill, result)
@@ -460,6 +510,15 @@ module SmartBot
         def total_hunks
           @patches.sum(&:hunks)
         end
+
+        def to_h
+          {
+            skill: @skill.name,
+            diagnosis: @diagnosis.to_h,
+            patches: @patches.map(&:to_h),
+            total_hunks: total_hunks
+          }
+        end
       end
 
       class RepairPatch
@@ -479,6 +538,17 @@ module SmartBot
 
         def hunks
           @content ? @content.lines.count { |l| !l.strip.empty? } : 1
+        end
+
+        def to_h
+          {
+            file: @file,
+            description: @description,
+            action: @action,
+            path: @path,
+            content_preview: @content.to_s.lines.first(3).join.strip,
+            hunks: hunks
+          }
         end
       end
     end

@@ -73,7 +73,7 @@ module SmartBot
         )
       end
 
-      def execute(plan, context: {}, enable_repair: true)
+      def execute(plan, context: {}, enable_repair: true, repair_confirmation_callback: nil)
         if plan.parallel_groups.size > 1 || plan.fallback_chain.any?
           fsm = FallbackStateMachine.new(
             plan: plan,
@@ -82,7 +82,10 @@ module SmartBot
           fsm.run(context: context)
         elsif enable_repair && plan.primary_skill
           # Use repair loop for single skill with auto-repair
-          repair_loop = RepairLoop.new(executor: executor)
+          repair_loop = RepairLoop.new(
+            executor: executor,
+            repair_confirmation_callback: repair_confirmation_callback
+          )
           repair_loop.execute_with_repair(
             plan.primary_skill,
             plan.parameters,

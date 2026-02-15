@@ -97,6 +97,7 @@ llms:
     model: qwen-plus
 
 default_llm: deepseek
+system_language: 简体中文
 ```
 
 ### 4. 开始对话
@@ -117,6 +118,7 @@ smart_bot agent
 |------|------|
 | `/models` | 列出所有可用 LLM 提供商 |
 | `/llm <name>` | 切换到指定提供商 (如 deepseek, siliconflow) |
+| `/language <name>` | 设置对话回复语言（如 `简体中文`、`English`） |
 | `/help` | 显示帮助信息 |
 | `Ctrl+C` | 退出交互模式 |
 
@@ -146,6 +148,7 @@ smart_bot agent -s "project1" -m "记住这是项目1"
 | `smart_bot agent -m "消息"` | 单次对话模式 |
 | `smart_bot agent` | 交互对话模式 |
 | `smart_bot status` | 查看配置状态 |
+| `smart_bot language <name>` | 设置默认对话语言 |
 | `smart_bot skill NAME` | 创建新 Skill |
 | `smart_bot cron list` | 列出定时任务 |
 | `smart_bot cron add ...` | 添加定时任务 |
@@ -156,6 +159,7 @@ smart_bot agent -s "project1" -m "记住这是项目1"
 |------|------|
 | `/models` | 列出所有可用 LLM 提供商 |
 | `/llm <name>` | 切换到指定提供商 |
+| `/language <name>` | 设置对话回复语言 |
 | `/skills` | 列出已加载的 Skills |
 | `/run_skill <skill> <task>` | 将子任务委派给指定 Skill |
 | `/help` | 显示帮助信息 |

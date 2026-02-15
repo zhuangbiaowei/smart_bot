@@ -85,6 +85,69 @@ RSpec.describe SmartBot::SkillSystem::RepairLoop do
         expect(call_count).to be > 1
       end
     end
+
+    context "when user rejects repair plan" do
+      it "stops after the first failed execution" do
+        failure_result = SmartBot::SkillSystem::ExecutionResult.failure(
+          skill: skill,
+          error: "Missing parameter: task"
+        )
+
+        confirmation = lambda do |_payload|
+          { approved: false }
+        end
+
+        loop_with_confirmation = described_class.new(
+          executor: executor,
+          repair_confirmation_callback: confirmation
+        )
+
+        allow(executor).to receive(:execute_skill).and_return(failure_result)
+
+        result = loop_with_confirmation.execute_with_repair(skill, {}, {})
+
+        expect(result.failure?).to be true
+        expect(executor).to have_received(:execute_skill).once
+      end
+    end
+
+    context "when user provides repair suggestion" do
+      it "adds user guidance before applying patches" do
+        failure_result = SmartBot::SkillSystem::ExecutionResult.failure(
+          skill: skill,
+          error: "Missing parameter: task"
+        )
+        success_result = SmartBot::SkillSystem::ExecutionResult.success(
+          skill: skill,
+          value: "fixed with user suggestion"
+        )
+
+        confirmation = lambda do |_payload|
+          { approved: true, suggestion: "请先校验 task 参数是否为空" }
+        end
+
+        loop_with_confirmation = described_class.new(
+          executor: executor,
+          repair_confirmation_callback: confirmation
+        )
+
+        call_count = 0
+        allow(executor).to receive(:execute_skill) do
+          call_count += 1
+          call_count == 1 ? failure_result : success_result
+        end
+
+        allow(loop_with_confirmation).to receive(:apply_patches).and_call_original
+        allow(loop_with_confirmation).to receive(:apply_append_section).and_return(true)
+        allow(loop_with_confirmation).to receive(:apply_yaml_patch).and_return(true)
+        allow(loop_with_confirmation).to receive(:apply_append_note).and_return(true)
+
+        result = loop_with_confirmation.execute_with_repair(skill, {}, {})
+
+        expect(result.success?).to be true
+        expect(loop_with_confirmation).to have_received(:apply_append_section).at_least(:once)
+      end
+    end
   end
 
   describe "#repairable?" do

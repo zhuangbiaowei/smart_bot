@@ -161,6 +161,10 @@ module SmartBot
         if result.success?
           say "✅ #{result.message}", :green
           say "   Location: #{result.path}" if result.path
+          if result.respond_to?(:installed) && result.installed
+            say "   Installed:"
+            result.installed.each { |item| say "     - #{item[:name]}" }
+          end
         else
           say "❌ #{result.message}", :red
         end

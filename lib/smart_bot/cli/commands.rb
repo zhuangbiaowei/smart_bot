@@ -5,6 +5,7 @@ require "yaml"
 require "open3"
 require "timeout"
 require "shellwords"
+require "json"
 
 # Load enhanced command execution system
 require_relative "../skill_system/execution/enhanced_command_runner"
@@ -12,11 +13,16 @@ require_relative "../skill_system/execution/enhanced_command_runner"
 module SmartBot
   module CLI
     class Commands < Thor
+      DEFAULT_SYSTEM_LANGUAGE = "简体中文"
+
       desc "agent", "Interact with the agent"
       option :message, aliases: "-m", desc: "Message to send"
       option :session, aliases: "-s", default: "cli:default", desc: "Session ID"
       option :llm, aliases: "-l", desc: "LLM to use"
       def agent
+        @interactive_agent_mode = options[:message].nil?
+        @smart_prompt_config_path = File.expand_path("~/.smart_bot/smart_prompt.yml")
+
         # 初始化 SmartAgent
         require "smart_agent"
         require "smart_prompt"
@@ -42,8 +48,9 @@ module SmartBot
         load_new_skill_system
         
         # 获取当前配置
-        smart_prompt_config = YAML.load_file(File.expand_path("~/.smart_bot/smart_prompt.yml"))
+        smart_prompt_config = load_smart_prompt_config
         current_llm = options[:llm] || smart_prompt_config["default_llm"] || "deepseek"
+        @system_language = configured_system_language(smart_prompt_config)
         
         if options[:message]
           # 单次对话模式
@@ -69,7 +76,7 @@ module SmartBot
           conversation = SmartPrompt::Conversation.new(sp_engine)
           conversation.use(current_llm)
           # 使用 with_history: true 确保系统消息也进入历史记录
-          conversation.sys_msg("You are SmartBot, a helpful AI assistant. Remember information the user shares with you during this conversation.", { with_history: true })
+          conversation.sys_msg(default_system_prompt(@system_language), { with_history: true })
 
           loop do
             begin
@@ -83,7 +90,7 @@ module SmartBot
                   # 新建对话
                   conversation = SmartPrompt::Conversation.new(sp_engine)
                   conversation.use(current_llm)
-                  conversation.sys_msg("You are SmartBot, a helpful AI assistant. Remember information the user shares with you during this conversation.", { with_history: true })
+                  conversation.sys_msg(default_system_prompt(@system_language), { with_history: true })
                   say "\n🆕 New conversation started!\n", :green
                 else
                   handle_command(user_input, smart_prompt_config, current_llm)
@@ -115,6 +122,7 @@ module SmartBot
           say "Config: #{config_path} " + set_color("✓", :green)
           config = YAML.load_file(config_path)
           say "Default LLM: #{config['default_llm'] || 'Not set'}"
+          say "System Language: #{config['system_language'] || DEFAULT_SYSTEM_LANGUAGE}"
           
           say "\nConfigured Providers:"
           config["llms"]&.each do |name, settings|
@@ -125,6 +133,31 @@ module SmartBot
         else
           say "Config: not found. Run 'smart_bot onboard'", :red
         end
+      end
+
+      desc "language [LANG]", "Show or set preferred conversation language"
+      def language(lang = nil)
+        config = load_smart_prompt_config
+
+        if lang.nil? || lang.strip.empty?
+          say "Current system language: #{set_color(configured_system_language(config), :green)}"
+          say "Usage: smart_bot language <LANG>"
+          return
+        end
+
+        language_value = normalize_language(lang)
+        unless valid_language?(language_value)
+          say "❌ Invalid language. Use letters, numbers, spaces, '-' or '_'.", :red
+          return
+        end
+
+        config["system_language"] = language_value
+        save_smart_prompt_config(config)
+        @system_language = language_value
+
+        say "✓ System language set to: #{set_color(language_value, :green)}"
+      rescue => e
+        say "❌ Failed to update language: #{e.message}", :red
       end
 
       desc "onboard", "Initialize SmartBot configuration"
@@ -254,36 +287,7 @@ module SmartBot
           end
         end
         
-        # ========== 3. 天气查询 ==========
-        weather_match = message.match(/(.+?)(?:的)?天气/i) || message.match(/weather\s+(?:in|for)?\s+(.+)/i)
-        if weather_match
-          location = weather_match[1].strip
-          # 移除常见后缀
-          location = location.gsub(/今天|明天|后天|现在|怎么样|如何/, '').strip
-          
-          say "🌤️  正在查询 #{location} 的天气...", :cyan
-          
-          tool = SmartAgent::Tool.find_tool(:get_weather)
-          if tool
-            result = tool.call({ "location" => location, "unit" => "c" })
-            
-            if result[:error]
-              return "查询天气失败: #{result[:error]}"
-            end
-            
-            return <<~WEATHER
-              #{result[:location]}, #{result[:country]} 当前天气:
-              
-              🌡️  温度: #{result[:temperature]}
-              📝  状况: #{result[:condition]}
-              💧  湿度: #{result[:humidity]}
-              💨  风速: #{result[:wind]}
-              🤔  体感: #{result[:feels_like]}
-            WEATHER
-          end
-        end
-        
-        # ========== 4. 搜索请求 ==========
+        # ========== 3. 搜索请求 ==========
         # 检查是否是搜索请求
         search_patterns = [
           /^搜索[：:]?\s*(.+)/i,
@@ -449,13 +453,15 @@ module SmartBot
         engine = SmartPrompt::Engine.new(File.expand_path("~/.smart_bot/smart_prompt.yml"))
         
         # 使用唯一的 worker 名称避免冲突
-        worker_name = :"temp_chat_#{llm_name}"
+        language_key = current_system_language.downcase.gsub(/[^a-z0-9]+/, "_").gsub(/^_+|_+$/, "")
+        language_key = "lang" if language_key.empty?
+        worker_name = :"temp_chat_#{llm_name}_#{language_key}"
         
         # 只在未定义时创建 worker
         unless SmartPrompt::Worker.workers.key?(worker_name)
           SmartPrompt.define_worker worker_name do
             use llm_name
-            sys_msg "You are SmartBot, a helpful AI assistant."
+            sys_msg default_system_prompt(current_system_language)
             prompt params[:text]
             send_msg
           end
@@ -489,32 +495,7 @@ module SmartBot
           return skill_result if skill_result
         end
         
-        # ========== 2. 天气查询 ==========
-        weather_match = message.match(/(.+?)(?:的)?天气/i) || message.match(/weather\s+(?:in|for)?\s+(.+)/i)
-        if weather_match
-          location = weather_match[1].strip
-          location = location.gsub(/今天|明天|后天|现在|怎么样|如何/, '').strip
-          
-          tool = SmartAgent::Tool.find_tool(:get_weather)
-          if tool
-            result = tool.call({ "location" => location, "unit" => "c" })
-            if result[:error]
-              return "查询天气失败: #{result[:error]}"
-            end
-            weather_info = <<~WEATHER
-              #{result[:location]}, #{result[:country]} 当前天气:
-              🌡️ 温度: #{result[:temperature]}
-              📝 状况: #{result[:condition]}
-              💧 湿度: #{result[:humidity]}
-              💨 风速: #{result[:wind]}
-            WEATHER
-            # 将天气信息加入对话历史（使用 with_history: true）
-            conversation.add_message({ role: "assistant", content: weather_info }, true)
-            return weather_info
-          end
-        end
-        
-        # ========== 3. 搜索请求 ==========
+        # ========== 2. 搜索请求 ==========
         search_patterns = [
           /^搜索[：:]?\s*(.+)/i,
           /搜索\s+(.+)/i,
@@ -554,7 +535,7 @@ module SmartBot
           if tool_result && !tool_result[:error]
             # 将网页内容作为上下文发送给 LLM
             context = "网页标题: #{tool_result[:title]}\n\n网页内容:\n#{tool_result[:content][0..2000]}"
-            conversation.add_message({ role: "user", content: "#{message}\n\n[网页内容]\n#{context}" }, true)
+            conversation.add_message({ role: "user", content: with_language_instruction("#{message}\n\n[网页内容]\n#{context}") }, true)
             response = conversation.send_msg(with_history: true)
             # 将助手回复也加入历史
             conversation.add_message({ role: "assistant", content: response }, true)
@@ -564,7 +545,7 @@ module SmartBot
         
         # ========== 5. 普通对话（使用 Conversation 维护历史）==========
         # 添加用户消息到历史（使用 with_history: true）
-        conversation.add_message({ role: "user", content: message }, true)
+        conversation.add_message({ role: "user", content: with_language_instruction(message) }, true)
         # 发送消息时使用 with_history: true 保留历史
         response = conversation.send_msg(with_history: true)
         # 将助手回复也加入历史
@@ -760,14 +741,16 @@ module SmartBot
         blocked = []
 
         selected.each do |cmd|
-          unless command_allowed_for_evidence?(cmd)
+          prepared_cmd = prepare_command_for_task(cmd, urls: urls)
+
+          unless command_allowed_for_evidence?(prepared_cmd)
             blocked << { command: cmd, reason: "blocked by safety filter" }
             next
           end
 
           # Use enhanced execution with validation and retry
           context = { urls: urls, task: task, interactive: false }
-          result = runner.run(cmd, context)
+          result = runner.run(prepared_cmd, context)
 
           if result[:success]
             executed << {
@@ -775,7 +758,7 @@ module SmartBot
               exit_code: 0,
               stdout: result[:stdout].to_s,
               stderr: result[:stderr].to_s,
-              command: result[:command],
+              command: result[:command] || prepared_cmd,
               original_command: cmd,
               adaptations: result[:adaptations]
             }
@@ -785,7 +768,7 @@ module SmartBot
               exit_code: -1,
               stdout: "",
               stderr: result[:error].to_s,
-              command: result[:command] || cmd,
+              command: result[:command] || prepared_cmd,
               original_command: cmd,
               error_stage: result[:stage]
             }
@@ -850,8 +833,27 @@ module SmartBot
         if urls.any?
           escaped_url = Shellwords.escape(urls.first)
           prepared = prepared.gsub("VIDEO_URL", escaped_url)
+
+          video_id = extract_youtube_video_id(urls.first)
+          prepared = prepared.gsub("VIDEO_ID", video_id) if video_id
         end
         prepared
+      end
+
+      def extract_youtube_video_id(url)
+        return nil if url.to_s.strip.empty?
+        u = url.to_s
+
+        if (m = u.match(/[?&]v=([A-Za-z0-9_-]{11})/))
+          return m[1]
+        end
+        if (m = u.match(%r{youtu\.be/([A-Za-z0-9_-]{11})}))
+          return m[1]
+        end
+        if (m = u.match(%r{/shorts/([A-Za-z0-9_-]{11})}))
+          return m[1]
+        end
+        nil
       end
 
       def run_evidence_command(command, timeout_sec: 30)
@@ -880,6 +882,8 @@ module SmartBot
 
       def summarize_evidence_execution(skill_name:, task:, extracted_commands:, selected_commands:, blocked_commands:, executed:, llm_name:)
         facts = extract_key_value_facts(executed)
+        successful_commands = executed.count { |e| e[:ok] }
+        verified_facts_count = facts.length
 
         verified = if facts.empty?
                      "- No structured facts extracted from command output."
@@ -934,6 +938,11 @@ module SmartBot
           Blocked Commands
           #{blocked}
 
+          Evidence Quality
+          - successful_commands: #{successful_commands}/#{executed.length}
+          - verified_facts_count: #{verified_facts_count}
+          - grounded: #{successful_commands > 0 && verified_facts_count > 0 ? "yes" : "no"}
+
           Verified Facts
           #{verified}
 
@@ -957,6 +966,9 @@ module SmartBot
         pairs = []
         executed.each do |e|
           [e[:stdout], e[:stderr]].each do |text|
+            json_facts = extract_facts_from_json(text)
+            pairs.concat(json_facts) if json_facts.any?
+
             text.to_s.each_line do |line|
               m = line.match(/^\s*([A-Za-z][A-Za-z0-9 _\-\/]{1,50})\s*:\s*(.+?)\s*$/)
               next unless m
@@ -975,6 +987,31 @@ module SmartBot
           uniq[k] ||= v
         end
         uniq.to_a.first(20)
+      end
+
+      def extract_facts_from_json(text)
+        body = text.to_s.strip
+        return [] if body.empty?
+
+        parsed = JSON.parse(body)
+        return [] unless parsed.is_a?(Hash)
+
+        keys = %w[title uploader channel view_count upload_date duration id webpage_url]
+        keys.filter_map do |k|
+          value = parsed[k]
+          next if value.nil? || value.to_s.strip.empty?
+          [k, value.to_s]
+        end
+      rescue JSON::ParserError, TypeError
+        []
+      end
+
+      def evidence_grounded_enough?(evidence_text)
+        text = evidence_text.to_s
+        successful = text[/successful_commands:\s*(\d+)\/\d+/, 1].to_i
+        facts = text[/verified_facts_count:\s*(\d+)/, 1].to_i
+        grounded_flag = text.match?(/grounded:\s*yes/i)
+        (successful > 0 && facts > 0) || grounded_flag
       end
 
       def build_grounding_guarded_task(task)
@@ -1227,7 +1264,11 @@ module SmartBot
 
           say "🎯 Skill System matched: #{primary_skill.name}", :cyan
 
-          result = SmartBot::SkillSystem.execute(plan, context: { llm: llm_name })
+          result = SmartBot::SkillSystem.execute(
+            plan,
+            context: { llm: llm_name },
+            repair_confirmation_callback: skill_repair_confirmation_callback
+          )
 
           if result.success?
             # Format the output nicely
@@ -1266,6 +1307,127 @@ module SmartBot
         
         # Add a header
         "📥 Download started by #{skill_name}\n\n#{formatted}"
+      end
+
+      def skill_repair_confirmation_callback
+        return nil unless @interactive_agent_mode
+        return nil unless $stdin.tty? && $stdout.tty?
+
+        method(:confirm_skill_repair)
+      end
+
+      def confirm_skill_repair(payload)
+        skill_name = payload[:skill]&.name || "unknown"
+        attempt = payload[:attempt]
+        diagnosis = payload[:diagnosis] || {}
+        repair_plan = payload[:repair_plan] || {}
+        patches = repair_plan[:patches] || []
+
+        say "\n🩹 Skill '#{skill_name}' 执行失败，准备进行第 #{attempt} 次自动修复。", :yellow
+        say "错误类型: #{diagnosis[:error_type] || 'unknown'}", :yellow
+        say "错误信息: #{diagnosis[:error_message]}", :yellow if diagnosis[:error_message]
+        say "计划补丁:", :cyan
+        patches.each_with_index do |patch, index|
+          say "  #{index + 1}. #{patch[:file]} (#{patch[:action]}): #{patch[:description]}"
+        end
+
+        answer = ask("是否应用以上修复？(y=应用 / n=跳过 / s=提供修复建议)", :yellow).to_s.strip.downcase
+        case answer
+        when "y", "yes"
+          { approved: true }
+        when "s", "suggest"
+          suggestion = ask("请输入你的修复建议（将追加到 SKILL.md 后重试）:", :yellow).to_s.strip
+          { approved: true, suggestion: suggestion }
+        else
+          { approved: false }
+        end
+      rescue => e
+        say "⚠️ 修复确认失败: #{e.message}", :yellow
+        { approved: false }
+      end
+
+      def load_smart_prompt_config
+        config_path = @smart_prompt_config_path || File.expand_path("~/.smart_bot/smart_prompt.yml")
+        return {} unless File.exist?(config_path)
+
+        data = YAML.load_file(config_path)
+        data.is_a?(Hash) ? data : {}
+      rescue
+        {}
+      end
+
+      def save_smart_prompt_config(config)
+        config_path = @smart_prompt_config_path || File.expand_path("~/.smart_bot/smart_prompt.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(config_path, YAML.dump(config))
+      end
+
+      def configured_system_language(config = nil)
+        source = config || load_smart_prompt_config
+        language = source["system_language"].to_s.strip
+        language.empty? ? DEFAULT_SYSTEM_LANGUAGE : language
+      end
+
+      def current_system_language
+        @system_language ||= configured_system_language
+      end
+
+      def normalize_language(value)
+        value.to_s.strip
+      end
+
+      def valid_language?(value)
+        return false if value.nil? || value.empty? || value.length > 50
+        !!(value =~ /\A[\p{L}\p{N}\s\-_]+\z/u)
+      end
+
+      def default_system_prompt(language)
+        <<~PROMPT.strip
+          You are SmartBot, a helpful AI assistant.
+          Remember information the user shares during this conversation.
+          Always respond in #{language}, unless the user explicitly asks for a different language.
+        PROMPT
+      end
+
+      def with_language_instruction(user_text)
+        language = current_system_language
+        "Please reply in #{language} unless I explicitly request another language.\n\n#{user_text}"
+      end
+
+      def render_skill_system_list
+        return say("\n⚠️ Skill System not available", :yellow) unless defined?(SmartBot::SkillSystem)
+
+        SmartBot::SkillSystem.load_all if SmartBot::SkillSystem.registry.empty?
+        registry = SmartBot::SkillSystem.registry
+
+        say "🛠️  Available Skills\n\n"
+
+        if registry.empty?
+          say "No skills found.", :yellow
+          return
+        end
+
+        available = registry.list_available
+        unavailable = registry.reject(&:available?)
+
+        if available.any?
+          say "Available (#{available.size}):", :green
+          available.each { |skill| display_skill_system_item(skill) }
+          say ""
+        end
+
+        if unavailable.any?
+          say "Unavailable (#{unavailable.size}):", :yellow
+          unavailable.each { |skill| display_skill_system_item(skill, available: false) }
+        end
+
+        say "\nStats: #{registry.stats}"
+      end
+
+      def display_skill_system_item(skill, available: true)
+        status = available ? "✓" : "✗"
+        color = available ? :green : :yellow
+        say "  #{status} #{skill.name} - #{skill.description}", color
       end
 
       def call_mcp_tool(server_name, tool_name, params)
@@ -1322,131 +1484,57 @@ module SmartBot
       # 模糊查找技能 - 基于关键词匹配描述、名称和标签
       def fuzzy_find_skill(query, limit = 5)
         return [] if query.nil? || query.strip.empty?
-        
+
         query = query.downcase.strip
-        query_words = query.split(/[\s,，。！？?]+/).reject { |w| w.empty? }
-        
-        # 识别关键动作词 - 中英文映射
-        action_keywords = {
-          "download" => ["download", "下载", "save", "保存", "get", "获取"],
-          "search" => ["search", "搜索", "find", "查找", "query", "查询"],
-          "weather" => ["weather", "天气", "temperature", "温度"],
-          "video" => ["video", "视频", "youtube", "bilibili", "tiktok", "抖音"],
-          "audio" => ["audio", "音频", "music", "音乐", "sound", "声音", "mp3"],
-          "image" => ["image", "图片", "photo", "照片", "picture", "图"],
-          "transcribe" => ["transcribe", "转录", "transcript", "字幕", "transcription"],
-          "analyze" => ["analyze", "分析", "analysis", "统计", "analytics"],
-          "convert" => ["convert", "转换", "transform", "格式化", "format"],
-          "send" => ["send", "发送", "email", "邮件", "message", "消息"]
-        }
-        
-        # 扩展查询词 - 添加语义相关词
-        expanded_words = query_words.dup
-        query_words.each do |word|
-          action_keywords.each do |action, keywords|
-            if keywords.include?(word)
-              expanded_words << action unless expanded_words.include?(action)
-              # 添加同义词组中的其他词
-              expanded_words.concat(keywords.reject { |k| k == word })
-            end
-          end
-        end
-        expanded_words.uniq!
-        
+        query_words = extract_keywords(query)
         skills = SmartBot::Skill.registry
         matches = []
-        
+
         skills.each do |name, skill|
           name_str = name.to_s.downcase
           desc = skill.description.to_s.downcase
-          
-          # 计算匹配分数
+          sys_skill = skill_system_skill(name_str)
+          triggers = sys_skill&.metadata&.triggers || []
+          sys_desc = sys_skill&.description.to_s.downcase
+          tool_names = skill.tools.map { |t| t[:name].to_s.downcase }
+
+          searchable_text = [name_str, desc, sys_desc, triggers.join(" "), tool_names.join(" ")].join(" ")
+          searchable_terms = extract_keywords(searchable_text)
+          overlap = (query_words & searchable_terms)
+
           score = 0
-          
-          # 1. 名称完全匹配 (最高优先级)
+
+          # Exact and near-exact name matches.
           score += 200 if name_str == query
-          
-          # 2. 名称包含完整查询词
           score += 100 if name_str.include?(query)
-          
-          # 3. 多个查询词都匹配名称（重要！）
-          name_matches = query_words.count { |w| w.length >= 2 && name_str.include?(w) }
-          score += name_matches * 60
-          
-          # 4. 查询词包含名称（短名称匹配）
+          score += query_words.count { |w| name_str.include?(w) } * 50
           score += 50 if query.include?(name_str) && name_str.length > 2
-          
-          # 5. 描述包含完整查询
-          score += 40 if desc.include?(query)
-          
-          # 6. 扩展词匹配（处理中英文语义）
-          expanded_words.each do |word|
-            next if word.length < 2
-            
-            # 名称匹配权重更高
-            if name_str.include?(word)
-              score += 35
-            end
-            
-            # 描述匹配 - 加权
-            if desc.include?(word)
-              score += 20
-              # 描述开头的匹配权重更高
-              score += 25 if desc.start_with?(word)
-              # 在 "Use when" 或 "Triggers on" 语句中的匹配
-              score += 30 if desc =~ /use when.*#{word}/ || desc =~ /triggers on.*#{word}/
-            end
-          end
-          
-          # 7. 原始查询词匹配（基础分）
-          query_words.each do |word|
-            next if word.length < 2
-            score += 10 if name_str.include?(word)
-            score += 5 if desc.include?(word)
-          end
-          
-          # 8. 关键词提取匹配（从描述中提取的关键词）
-          keywords = extract_keywords(desc)
-          query_keywords = extract_keywords(query)
-          common = keywords & query_keywords
-          score += common.length * 25
-          
-          # 9. 工具名称匹配
-          skill.tools.each do |tool|
-            tool_name = tool[:name].to_s.downcase
-            score += 35 if tool_name.include?(query)
-            query_words.each do |word|
-              next if word.length < 2
-              score += 15 if tool_name.include?(word)
-            end
-            # 扩展词匹配
-            expanded_words.each do |word|
-              next if word.length < 2
-              score += 20 if tool_name.include?(word)
-            end
-          end
-          
-          # 10. 动作语义匹配 - 检测查询中的动作意图
-          action_keywords.each do |action, keywords|
-            if keywords.any? { |k| query.include?(k) }
-              # skill 名称或描述包含相关动作
-              if name_str.include?(action) || desc.include?(action)
-                score += 60
-              end
-              # 检查工具名称
-              skill.tools.each do |tool|
-                if tool[:name].to_s.downcase.include?(action)
-                  score += 40
-                end
-              end
-            end
-          end
-          
+
+          # Textual overlap from SKILL metadata / description / tool names.
+          score += overlap.size * 20
+          score += 40 if desc.include?(query) || sys_desc.include?(query)
+
+          # Explicit trigger phrase hit has strong signal.
+          trigger_hits = triggers.count { |t| query.include?(t.to_s.downcase) }
+          score += trigger_hits * 30
+
           matches << { name: name, skill: skill, score: score } if score > 0
         end
-        
+
         # 按分数排序并返回前 N 个
         matches.sort_by { |m| -m[:score] }.first(limit)
+      end
+
+      def skill_system_skill(skill_name)
+        return nil unless defined?(SmartBot::SkillSystem)
+        return nil unless SmartBot::SkillSystem.respond_to?(:registry)
+
+        registry = SmartBot::SkillSystem.registry
+        return nil if registry.nil? || registry.empty?
+
+        registry.find(skill_name)
+      rescue
+        nil
       end
       
       # 提取关键词（简单的 TF-IDF 近似）
@@ -1616,6 +1704,10 @@ module SmartBot
             )
 
             if evidence_result
+              if require_evidence && !evidence_grounded_enough?(evidence_result)
+                return "❌ run_skill 证据不足：未能从实际命令输出中提取到可验证视频信息（如 title/uploader/view_count）。已拒绝生成总结以避免幻觉。"
+              end
+
               # 将执行结果作为上下文传递给 agent
               context = urls.any? ? "包含的URL: #{urls.join(', ')}\n\n" : ""
               context += "命令执行结果:\n#{evidence_result}"
@@ -1650,17 +1742,16 @@ module SmartBot
               })
             end
           else
-            # 调用普通工具（如 smart_search）
-            # 提取搜索关键词或任务
-            query = message.gsub(/用#{skill_name}/, "").gsub(/#{skill_name}/, "").strip
-            query = urls.first if urls.any? && query.empty?
-            
+            # 调用普通工具（参数根据工具定义动态构建）
+            params = build_tool_call_params(
+              tool: tool,
+              skill_name: skill_name,
+              message: message,
+              urls: urls
+            )
+
             say "🔍 执行: #{tool_name}", :cyan
-            
-            result = tool.call({ 
-              "query" => query,
-              "count" => 5
-            })
+            result = tool.call(params)
           end
 
           if result.is_a?(Hash)
@@ -1690,6 +1781,41 @@ module SmartBot
         nil
       end
 
+      def build_tool_call_params(tool:, skill_name:, message:, urls:)
+        defined_params = tool.context&.params&.keys&.map(&:to_s) || []
+        raw_text = strip_grounding_suffix(message.to_s)
+        cleaned_text = raw_text.gsub(/用\s*#{Regexp.escape(skill_name.to_s)}/i, "").gsub(/#{Regexp.escape(skill_name.to_s)}/i, "").strip
+        cleaned_text = urls.first.to_s if cleaned_text.empty? && urls.any?
+
+        params = {}
+
+        params["args"] = cleaned_text if defined_params.include?("args")
+        params["task"] = cleaned_text if defined_params.include?("task")
+        params["query"] = cleaned_text if defined_params.include?("query")
+        params["count"] = 5 if defined_params.include?("count")
+
+        if defined_params.include?("url")
+          params["url"] = urls.first.to_s.empty? ? cleaned_text : urls.first.to_s
+        end
+
+        if defined_params.include?("location")
+          params["location"] = cleaned_text
+        end
+
+        if defined_params.include?("days")
+          days = raw_text[/\b(\d+)\b/, 1]&.to_i
+          days ||= 1
+          params["days"] = [days, 1].max
+        end
+
+        if params.empty?
+          params["query"] = cleaned_text
+          params["count"] = 5
+        end
+
+        params
+      end
+
       # 尝试使用 Markdown Skills
       # 根据用户输入匹配合适的 skill 并调用
       def try_markdown_skills(message, llm_name)
@@ -1711,7 +1837,7 @@ module SmartBot
 
           请判断哪个技能最适合处理用户的请求。
           如果没有任何技能匹配，请回复 "none"。
-          如果有匹配的技能，请只回复技能名称（如：search, weather, invoice_organizer）。
+          如果有匹配的技能，请只回复技能名称（必须来自上面的可用技能列表）。
           只输出技能名称，不要解释。
         PROMPT
 
@@ -1770,7 +1896,8 @@ module SmartBot
           say "\n📖 Commands:"
           say "  /models              - List available LLMs"
           say "  /llm <name>          - Switch LLM provider"
-          say "  /skills [offset]     - List skills (default: first 40)"
+          say "  /language [name]     - Show or set response language"
+          say "  /skills              - List all available skills"
           say "  /find <keyword>      - Search skills by keyword"
           say "  /skill_help <name>   - Show detailed help for a skill"
           say "  /run_skill <skill> <task> - Delegate task to a specific skill"
@@ -1800,37 +1927,27 @@ module SmartBot
           else
             say "❌ Unknown LLM: #{new_llm}", :red
           end
+
+        when "/language"
+          if args.empty?
+            say "Current language: #{set_color(current_system_language, :green)}"
+            say "Usage: /language <name>"
+            return
+          end
+
+          language_value = normalize_language(args.join(" "))
+          unless valid_language?(language_value)
+            say "❌ Invalid language. Use letters, numbers, spaces, '-' or '_'.", :red
+            return
+          end
+
+          config["system_language"] = language_value
+          save_smart_prompt_config(config)
+          @system_language = language_value
+          say "✓ Language updated: #{set_color(language_value, :green)}"
           
         when "/skills"
-          # 解析分页参数: /skills [offset]
-          offset = args.first.to_i
-          offset = 0 if offset < 0
-
-          all_skills = SmartBot::Skill.registry.to_a
-          total = all_skills.length
-
-          if total == 0
-            say "\n🛠️  No skills loaded", :yellow
-          else
-            per_page = 40
-            start_idx = offset
-            end_idx = [offset + per_page, total].min
-
-            say "\n🛠️  Skills (#{start_idx + 1}-#{end_idx} of #{total}):\n"
-
-            all_skills[start_idx...end_idx].each do |name, skill|
-              desc = skill.description.to_s[0..60]
-              desc += "..." if skill.description.to_s.length > 60
-              say "  • #{set_color(name.to_s, :green)} - #{desc}"
-            end
-
-            # 显示分页提示
-            if end_idx < total
-              say "\n  ... and #{total - end_idx} more"
-              say "  Use /skills #{end_idx} to see more"
-            end
-            say ""
-          end
+          render_skill_system_list
 
         when "/find"
           if args.empty?

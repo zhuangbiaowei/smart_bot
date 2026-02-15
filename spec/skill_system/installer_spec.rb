@@ -64,6 +64,40 @@ RSpec.describe SmartBot::SkillSystem::SkillInstaller do
       result = installer.install_from_local("/nonexistent/path")
       expect(result.success?).to be false
     end
+
+    it "installs all skills from a repository directory" do
+      repo_dir = File.join(temp_dir, "repo_skills")
+      alpha_dir = File.join(repo_dir, "alpha")
+      beta_dir = File.join(repo_dir, "nested", "beta")
+
+      FileUtils.mkdir_p(alpha_dir)
+      FileUtils.mkdir_p(beta_dir)
+      File.write(File.join(alpha_dir, "SKILL.md"), "# Alpha Skill")
+      File.write(File.join(beta_dir, "SKILL.md"), "# Beta Skill")
+
+      target = File.join(temp_dir, "installed_repo")
+      batch_installer = described_class.new(target_dir: target)
+      result = batch_installer.install_from_local(repo_dir)
+
+      expect(result.success?).to be true
+      expect(File.exist?(File.join(target, "alpha", "SKILL.md"))).to be true
+      expect(File.exist?(File.join(target, "beta", "SKILL.md"))).to be true
+    end
+
+    it "overwrites existing skill when force is true" do
+      target = File.join(temp_dir, "force_target")
+      force_installer = described_class.new(target_dir: target)
+
+      result1 = force_installer.install_from_local(skill_dir, name: "my_skill")
+      expect(result1.success?).to be true
+
+      File.write(File.join(skill_dir, "SKILL.md"), "# Updated Skill")
+      result2 = force_installer.install_from_local(skill_dir, name: "my_skill", force: true)
+
+      expect(result2.success?).to be true
+      content = File.read(File.join(target, "my_skill", "SKILL.md"))
+      expect(content).to include("Updated Skill")
+    end
   end
 
   describe "#validate_skill_structure" do
@@ -117,6 +151,25 @@ RSpec.describe SmartBot::SkillSystem::SkillInstaller do
     it "fails if skill not found" do
       result = installer.uninstall("nonexistent")
       expect(result.success?).to be false
+    end
+
+    it "uninstalls by normalized skill name from SKILL.md frontmatter" do
+      skill_dir = File.join(temp_dir, "verl")
+      FileUtils.mkdir_p(skill_dir)
+      File.write(
+        File.join(skill_dir, "SKILL.md"),
+        <<~MD
+          ---
+          name: verl-rl-training
+          description: test
+          ---
+          # Test
+        MD
+      )
+
+      result = installer.uninstall("verl_rl_training")
+      expect(result.success?).to be true
+      expect(File.exist?(skill_dir)).to be false
     end
   end
 end

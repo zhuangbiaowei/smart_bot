@@ -1,18 +1,11 @@
 # frozen_string_literal: true
+require "set"
 
 module SmartBot
   module SkillSystem
     # Scoring algorithm for skill candidates
     # Based on weights from skill_routing_spec.md
     class SkillScorer
-      INTENT_KEYWORDS = {
-        download: %w[download 下载 保存 grab 抓取 下载器],
-        summarize: %w[summarize summary transcript 总结 摘要 转录],
-        search: %w[search find 查找 搜索 查询],
-        weather: %w[weather 天气 预报 forecast],
-        code: %w[code 编码 编程 script 脚本]
-      }.freeze
-
       WEIGHTS = {
         intent_match: 0.40,
         trigger_match: 0.20,
@@ -45,45 +38,25 @@ module SmartBot
       private
 
       def calculate_intent_match(skill, query)
-        return 0.5 if skill.description.nil?
+        query_tokens = tokenize(query)
+        return 0.5 if query_tokens.empty?
 
-        # Baseline overlap from description
-        desc_words = tokenize(skill.description)
-        query_words = query.downcase.split.to_set
-
-        return 0.5 if desc_words.empty? || query_words.empty?
-
-        overlap = (desc_words & query_words).size
-        total = (desc_words | query_words).size
-        base = (overlap.to_f / total * 0.5) + 0.25
-
-        # Generic intent affinity boost/penalty from metadata text.
-        query_intents = detect_intents(query)
-        return base if query_intents.empty?
-
-        skill_text = [
+        # Route purely from SKILL metadata text and skill identity.
+        skill_tokens = tokenize([
           skill.name,
           skill.description,
           skill.metadata.triggers.join(" "),
           skill.metadata.anti_triggers.join(" ")
-        ].join(" ").downcase
+        ].join(" "))
 
-        aligned = query_intents.count do |intent|
-          keywords = INTENT_KEYWORDS[intent]
-          keywords.any? { |k| skill_text.include?(k) }
-        end
+        return 0.5 if skill_tokens.empty?
 
-        anti_aligned = query_intents.count do |intent|
-          keywords = INTENT_KEYWORDS[intent]
-          skill.metadata.anti_triggers.any? do |anti|
-            anti_str = anti.to_s.downcase
-            keywords.any? { |k| anti_str.include?(k) }
-          end
-        end
+        overlap = (query_tokens & skill_tokens).size
+        union = (query_tokens | skill_tokens).size
+        jaccard = union.zero? ? 0.0 : overlap.to_f / union
 
-        boosted = base + (aligned * 0.08) - (anti_aligned * 0.12)
-        boosted -= negative_intent_penalty(skill, query_intents)
-        boosted.clamp(0.0, 1.0)
+        # Keep neutral baseline for sparse text while allowing strong lexical matches.
+        (0.30 + (jaccard * 0.70)).clamp(0.0, 1.0)
       end
 
       def calculate_trigger_match(candidate, query)
@@ -136,13 +109,6 @@ module SmartBot
         0.0
       end
 
-      def detect_intents(query)
-        q = query.to_s.downcase
-        INTENT_KEYWORDS.filter_map do |intent, keywords|
-          intent if keywords.any? { |kw| q.include?(kw) }
-        end
-      end
-
       def trigger_overlap_boost(skill, query)
         q = query.to_s.downcase
         matched = skill.metadata.triggers.select { |t| q.include?(t.to_s.downcase) }
@@ -158,25 +124,6 @@ module SmartBot
 
       def tokenize(text)
         text.to_s.downcase.scan(/[a-z0-9\u4e00-\u9fff]+/).to_set
-      end
-
-      def negative_intent_penalty(skill, query_intents)
-        return 0.0 if query_intents.empty?
-
-        text = [skill.description, skill.metadata.triggers.join(" ")].join(" ").downcase
-        penalty = 0.0
-
-        if query_intents.include?(:download)
-          # Generic negation patterns that indicate "this skill is not for downloading".
-          penalty += 0.25 if text.match?(/not\s+for\s+download|not\s+for\s+downloading|不.*下载|不是.*下载|非.*下载/)
-        end
-
-        if query_intents.include?(:summarize)
-          # Symmetric rule for summary/transcript intent.
-          penalty += 0.25 if text.match?(/not\s+for\s+summar|not\s+for\s+transcript|不.*总结|不是.*总结|非.*总结|不.*转录/)
-        end
-
-        penalty
       end
     end
   end

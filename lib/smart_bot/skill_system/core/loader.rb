@@ -108,13 +108,27 @@ module SmartBot
 
           return nil unless definition
 
+          frontmatter = load_skill_frontmatter(path)
+          merged_description = frontmatter&.dig("description") || definition.description
+          merged_triggers = Array(frontmatter&.dig("triggers")).compact
+          merged_anti_triggers = Array(frontmatter&.dig("anti_triggers")).compact
+
+          if merged_triggers.empty? && frontmatter
+            merged_triggers = infer_triggers_from_frontmatter(frontmatter, merged_description)
+          end
+          merged_triggers = infer_triggers(definition) if merged_triggers.empty?
+
           # Create metadata from definition
           metadata = SkillMetadata.new(
             name: skill_name,
-            description: definition.description,
-            version: definition.version,
-            author: definition.author,
-            triggers: infer_triggers(definition),
+            description: merged_description,
+            version: frontmatter&.dig("version") || definition.version,
+            author: frontmatter&.dig("author") || definition.author,
+            triggers: merged_triggers,
+            anti_triggers: merged_anti_triggers,
+            cost_hint: frontmatter&.dig("cost_hint")&.to_sym,
+            always: frontmatter&.dig("always"),
+            parallel_safe: frontmatter&.dig("parallel_safe"),
             type: :ruby_native
           )
 
@@ -176,6 +190,17 @@ module SmartBot
           warn "Failed to load OpenClaw skill #{path}: #{e.message}"
           warn "  #{e.backtrace.first(3).join("\n  ")}"
         end
+        nil
+      end
+
+      def load_skill_frontmatter(path)
+        skill_md = File.join(path, "SKILL.md")
+        return nil unless File.exist?(skill_md)
+
+        content = File.read(skill_md, encoding: "UTF-8")
+        frontmatter, _remaining = parse_frontmatter(content)
+        frontmatter.is_a?(Hash) ? frontmatter : nil
+      rescue
         nil
       end
 
@@ -347,9 +372,11 @@ module SmartBot
 
         # Add words from description
         if definition.description
-          definition.description.downcase.split.each do |word|
-            clean = word.gsub(/[^a-z0-9]/, "")
-            triggers << clean if clean.length > 3
+          definition.description.downcase.scan(/[a-z0-9]+|[\u4e00-\u9fff]+/).each do |word|
+            clean = word.gsub(/[^a-z0-9\u4e00-\u9fff]/, "")
+            next if clean.empty?
+
+            triggers << clean if clean.length >= 2
           end
         end
 

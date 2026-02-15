@@ -2,6 +2,7 @@
 
 require "timeout"
 require "shellwords"
+require "uri"
 require_relative "openclaw_executor"
 
 module SmartBot
@@ -104,15 +105,106 @@ module SmartBot
           error: "Ruby skill not registered: #{skill.name}"
         ) unless definition
 
-        # Find the agent tool for this skill
-        tool_name = "#{skill.name}_agent"
+        tool_name = select_ruby_tool_name(skill, definition, parameters)
+        return ExecutionResult.failure(
+          skill: skill,
+          error: "No executable tool found for Ruby skill: #{skill.name}"
+        ) unless tool_name
 
         begin
-          result = SmartAgent::Tool.call(tool_name, parameters.transform_keys(&:to_s))
+          tool = SmartAgent::Tool.find_tool(tool_name.to_sym) || SmartAgent::Tool.find_tool(tool_name.to_s)
+          return ExecutionResult.failure(
+            skill: skill,
+            error: "Tool not found: #{tool_name}"
+          ) unless tool
+
+          input = build_ruby_tool_input(skill, tool, parameters)
+          result = tool.call(input)
           ExecutionResult.success(skill: skill, value: result)
         rescue => e
           ExecutionResult.failure(skill: skill, error: e.message)
         end
+      end
+
+      def select_ruby_tool_name(skill, definition, parameters)
+        input = parameters.transform_keys(&:to_s)
+        requested = input["tool"] || input["action"]
+        candidates = []
+        candidates << requested if requested && !requested.to_s.strip.empty?
+        candidates << "#{skill.name}_agent"
+
+        Array(definition.tools).each do |tool_def|
+          tool_name = tool_def[:name] || tool_def["name"]
+          candidates << tool_name.to_s unless tool_name.nil?
+        end
+
+        candidates.compact.uniq.find do |name|
+          SmartAgent::Tool.find_tool(name.to_sym) || SmartAgent::Tool.find_tool(name.to_s)
+        end
+      end
+
+      def build_ruby_tool_input(skill, tool, parameters)
+        input = parameters.transform_keys(&:to_s)
+        defined_keys = tool.context&.params&.keys&.map(&:to_s) || []
+        return input if defined_keys.empty?
+
+        task = input["task"].to_s
+        query = input["query"].to_s
+        text = [task, query].find { |v| !v.empty? }.to_s
+        built = {}
+
+        defined_keys.each do |key|
+          if input.key?(key) && !input[key].to_s.empty?
+            built[key] = input[key]
+            next
+          end
+
+          case key
+          when "task", "query", "args"
+            built[key] = text unless text.empty?
+          when "url"
+            built[key] = extract_first_url(text)
+          when "location"
+            location = extract_location_candidate(text, skill.metadata.triggers)
+            built[key] = location unless location.empty?
+          when "days"
+            days = text[/\b(\d+)\b/, 1]&.to_i
+            built[key] = [days || 1, 1].max
+          end
+        end
+
+        built.delete_if { |_k, v| v.nil? || v.to_s.empty? }
+        built.empty? ? input : built
+      end
+
+      def extract_first_url(text)
+        match = text.to_s.match(%r{https?://[^\s]+})
+        match ? match[0] : nil
+      end
+
+      def extract_location_candidate(text, triggers)
+        raw = text.to_s.dup
+        return "" if raw.empty?
+
+        Array(triggers).sort_by { |t| -t.to_s.length }.each do |trigger|
+          t = trigger.to_s.strip
+          next if t.empty?
+          raw.gsub!(/#{Regexp.escape(t)}/i, " ")
+        end
+
+        cleaned = raw.gsub(/[^\p{Han}A-Za-z0-9\s]/, " ").gsub(/\s+/, " ").strip
+        return "" if cleaned.empty?
+
+        en_tokens = cleaned.split(/\s+/)
+        en_stopwords = %w[today tomorrow now weather forecast whats what is are in for at how]
+        place = en_tokens.find { |tok| tok.match?(/[A-Za-z]/) && !en_stopwords.include?(tok.downcase) }
+        return place if place
+
+        if (m = cleaned.match(/([\p{Han}]{2,})(?=今天|明天|后天|现在|的|$)/))
+          return m[1]
+        end
+
+        cleaned
       end
 
       def invoke_instruction_skill(skill, parameters)

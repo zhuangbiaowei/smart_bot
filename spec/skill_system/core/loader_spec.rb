@@ -6,6 +6,50 @@ require "smart_bot/skill_system"
 
 RSpec.describe SmartBot::SkillSystem::UnifiedLoader do
   describe "#load_from_path" do
+    it "loads Ruby skill metadata from SKILL.md frontmatter when present" do
+      Dir.mktmpdir("loader_spec_") do |tmpdir|
+        skill_dir = File.join(tmpdir, "ruby_weather")
+        Dir.mkdir(skill_dir)
+
+        File.write(
+          File.join(skill_dir, "skill.rb"),
+          <<~RUBY
+            SmartBot::Skill.register :ruby_weather do
+              desc "legacy ruby weather skill"
+              ver "0.1.0"
+              author_name "Spec"
+            end
+          RUBY
+        )
+
+        File.write(
+          File.join(skill_dir, "SKILL.md"),
+          <<~MD
+            ---
+            name: ruby_weather
+            description: ruby weather metadata
+            triggers:
+              - 天气
+              - weather
+            anti_triggers:
+              - 股票
+            ---
+
+            # Ruby Weather
+          MD
+        )
+
+        loader = described_class.new(workspace: tmpdir, repo_root: tmpdir, home: tmpdir)
+        skill = loader.load_from_path(skill_dir)
+
+        expect(skill).not_to be_nil
+        expect(skill.type).to eq(:ruby_native)
+        expect(skill.metadata.triggers).to include("天气", "weather")
+        expect(skill.metadata.anti_triggers).to include("股票")
+        expect(skill.metadata.description).to eq("ruby weather metadata")
+      end
+    end
+
     it "loads plain SKILL.md frontmatter as openclaw_instruction" do
       Dir.mktmpdir("loader_spec_") do |tmpdir|
         skill_dir = File.join(tmpdir, "plain_skill")

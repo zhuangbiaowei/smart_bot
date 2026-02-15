@@ -127,48 +127,7 @@ module SmartBot
             triggers << word if word.length >= 3 || word.match?(/\p{Han}/)
           end
 
-          # 4. Add common trigger words based on skill type
-          triggers.concat(infer_common_triggers(name, desc))
-
           triggers.uniq.compact
-        end
-
-        def infer_common_triggers(name, desc)
-          common = []
-          name_str = name.to_s.downcase
-          desc_str = desc.to_s.downcase
-
-          # Define trigger mappings
-          trigger_mappings = {
-            /weather|天气|forecast|预报/ => ["weather", "天气", "forecast", "预报", "temperature", "温度", "sunny", "rain"],
-            /search|搜索|find|查找/ => ["search", "搜索", "find", "查找", "lookup", "query", "查询"],
-            /image|图片|照片|photo/ => ["image", "图片", "photo", "照片", "picture", "pic", "图"],
-            /video|视频|movie|电影/ => ["video", "视频", "movie", "电影", "film", "clip"],
-            /audio|音频|sound|音乐|music/ => ["audio", "音频", "sound", "音乐", "music", "song", "voice"],
-            /code|代码|program|编程/ => ["code", "代码", "program", "编程", "script", "脚本", "develop"],
-            /web|网页|fetch|抓取|scrape/ => ["web", "网页", "fetch", "抓取", "scrape", "download", "下载"],
-            /file|文件|doc|document/ => ["file", "文件", "document", "文档", "read", "write"],
-            /git|版本|version|commit/ => ["git", "版本", "commit", "branch", "merge"],
-            /health|健康|check|检查|security|安全/ => ["health", "健康", "check", "检查", "security", "安全", "audit", "审计"],
-            /note|笔记|memo/ => ["note", "笔记", "memo", "记录"],
-            /reminder|提醒|alarm/ => ["reminder", "提醒", "alarm", "定时"],
-            /calendar|日历|schedule/ => ["calendar", "日历", "schedule", "日程"],
-            /email|邮件|mail/ => ["email", "邮件", "mail", "message"],
-            /slack|discord|chat|消息/ => ["slack", "discord", "chat", "消息", "im"],
-            /translate|翻译/ => ["translate", "翻译", "language", "语言"],
-            /summarize|总结|summary/ => ["summarize", "总结", "summary", "摘要", "outline"],
-            /generate|生成|create/ => ["generate", "生成", "create", "创建", "make"],
-            /analyze|分析|analysis/ => ["analyze", "分析", "analysis", "统计"],
-            /convert|转换|transform/ => ["convert", "转换", "transform", "change"]
-          }
-
-          trigger_mappings.each do |pattern, words|
-            if name_str.match?(pattern) || desc_str.match?(pattern)
-              common.concat(words)
-            end
-          end
-
-          common
         end
 
         def infer_name_from_content
